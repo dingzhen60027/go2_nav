@@ -37,6 +37,8 @@ class ImuProcess {
     void Process(const common::MeasureGroup &meas, esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state,
                  PointCloudType::Ptr pcl_un_);
 
+    common::M3D gravity_rotation_;    // rotation to align IMU up → world +z
+
     std::ofstream fout_imu_;
     Eigen::Matrix<double, 12, 12> Q_;
     common::V3D cov_acc_;
@@ -81,6 +83,7 @@ ImuProcess::ImuProcess() : b_first_frame_(true), imu_need_init_(true) {
     Lidar_T_wrt_IMU_ = common::Zero3d;
     Lidar_R_wrt_IMU_ = common::Eye3d;
     last_imu_.reset(new sensor_msgs::msg::Imu());
+    gravity_rotation_.setIdentity();
 }
 
 ImuProcess::~ImuProcess() {}
@@ -146,12 +149,9 @@ void ImuProcess::IMUInit(const common::MeasureGroup &meas, esekfom::esekf<state_
     state_ikfom init_state = kf_state.get_x();
     init_state.grav = S2(-mean_acc_ / mean_acc_.norm() * common::G_m_s2);
 
-    // Align world frame with gravity: rotate so IMU's "up" points to world +z
-    common::V3D up_dir = mean_acc_.normalized();                          // IMU's "up" direction (reaction to gravity)
-    Eigen::Matrix3d R_grav = Eigen::Quaterniond::FromTwoVectors(
-        up_dir, common::V3D(0, 0, 1)).toRotationMatrix();                // IMU up → world +z
-    init_state.rot = SO3(R_grav);                                         // set world frame = gravity-aligned
-    init_state.grav = S2(R_grav * (-mean_acc_ / mean_acc_.norm() * common::G_m_s2));  // grav in new world frame
+    // Store rotation to level PCD (align IMU up → world +z)
+    common::V3D up_dir = mean_acc_.normalized();
+    gravity_rotation_ = Eigen::Quaterniond::FromTwoVectors(up_dir, Eigen::Vector3d::UnitZ()).toRotationMatrix();
 
     init_state.bg = mean_gyr_;
     init_state.offset_T_L_I = Lidar_T_wrt_IMU_;

@@ -6,6 +6,7 @@
 #include <yaml-cpp/yaml.h>
 #include <execution>
 #include <fstream>
+#include <pcl/common/transforms.h>
 
 #include "laser_mapping.h"
 #include "utils.h"
@@ -1146,14 +1147,23 @@ void LaserMapping::PointBodyLidarToIMU(PointType const *const pi, PointType *con
 
 void LaserMapping::Finish() {
     /**************** save map ****************/
-    /* 1. make sure you have enough memories
-    /* 2. pcd save will largely influence the real-time performences **/
     if (pcl_wait_save_->size() > 0 && pcd_save_en_) {
+        CloudPtr pcd_to_save = pcl_wait_save_;
+        // Auto-level PCD using IMU gravity estimate
+        const auto &R = p_imu_->gravity_rotation_;
+        if (!R.isIdentity(1e-6)) {
+            Eigen::Affine3f T = Eigen::Affine3f::Identity();
+            T.rotate(R.cast<float>());
+            pcd_to_save.reset(new PointCloudType());
+            pcl::transformPointCloud(*pcl_wait_save_, *pcd_to_save, T);
+            LOG(INFO) << "auto-leveled PCD with gravity rotation";
+        }
+
         std::string file_name = std::string("scans.pcd");
         std::string all_points_dir(std::string(std::string(ROOT_DIR) + "PCD/") + file_name);
         pcl::PCDWriter pcd_writer;
         LOG(INFO) << "current scan saved to /PCD/" << file_name;
-        pcd_writer.writeBinary(all_points_dir, *pcl_wait_save_);
+        pcd_writer.writeBinary(all_points_dir, *pcd_to_save);
     }
 
     LOG(INFO) << "finish done";
