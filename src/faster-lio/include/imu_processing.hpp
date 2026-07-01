@@ -146,6 +146,13 @@ void ImuProcess::IMUInit(const common::MeasureGroup &meas, esekfom::esekf<state_
     state_ikfom init_state = kf_state.get_x();
     init_state.grav = S2(-mean_acc_ / mean_acc_.norm() * common::G_m_s2);
 
+    // Align world frame with gravity: rotate so IMU's "up" points to world +z
+    common::V3D up_dir = mean_acc_.normalized();                          // IMU's "up" direction (reaction to gravity)
+    Eigen::Matrix3d R_grav = Eigen::Quaterniond::FromTwoVectors(
+        up_dir, common::V3D(0, 0, 1)).toRotationMatrix();                // IMU up → world +z
+    init_state.rot = SO3(R_grav);                                         // set world frame = gravity-aligned
+    init_state.grav = S2(R_grav * (-mean_acc_ / mean_acc_.norm() * common::G_m_s2));  // grav in new world frame
+
     init_state.bg = mean_gyr_;
     init_state.offset_T_L_I = Lidar_T_wrt_IMU_;
     init_state.offset_R_L_I = Lidar_R_wrt_IMU_;
