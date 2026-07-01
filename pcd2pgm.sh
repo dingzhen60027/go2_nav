@@ -1,50 +1,50 @@
 #!/bin/bash
+# pcd2pgm.sh — 用 pcd2pgm 包将 PCD 转为 2D 导航地图, 自动命名不覆盖
+# 用法: ./pcd2pgm.sh [PCD文件]
 
 set -e
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PCD_DIR="/home/wjg/go2_nav/src/faster-lio/PCD"
+OUT_DIR="/home/wjg/go2_nav/maps"
+PCD_FILE="${1:-${PCD_DIR}/scans.pcd}"
 
-echo "========== PCD → PGM 转换 =========="
+if [ ! -f "$PCD_FILE" ]; then
+    echo "错误: 未找到 $PCD_FILE"
+    exit 1
+fi
+
+mkdir -p "$OUT_DIR"
+TIMESTAMP=$(date +%m%d_%H%M)
+
+# 杀旧进程
+pkill -9 -f pcd2pgm 2>/dev/null || true
+sleep 1
+
+source /home/wjg/go2_nav/install/setup.bash
+
+echo "===== PCD → PGM (pcd2pgm) ====="
+echo "PCD: $PCD_FILE ($(du -h "$PCD_FILE" | cut -f1))"
 echo ""
 
-# 1. source 环境
-echo "[1/3] 加载 ROS2 环境..."
-source "$SCRIPT_DIR/install/setup.bash"
-echo ""
-
-# 2. 启动 pcd2pgm
-echo "[2/3] 启动 pcd2pgm (加载 PCD → 发布 /map)..."
-PCD_FILE="${1:-$SCRIPT_DIR/src/faster-lio/PCD/scans.pcd}"
-echo "  PCD 文件: $PCD_FILE"
-
-ros2 run pcd2pgm pcd2pgm_node \
-  --ros-args \
+# 启动 pcd2pgm
+ros2 run pcd2pgm pcd2pgm_node --ros-args \
   -p pcd_file:="$PCD_FILE" \
   -p map_resolution:=0.05 \
-  -p thre_z_min:=-0.3 \
-  -p thre_z_max:=0.5 \
+  -p thre_z_min:=0.2 \
+  -p thre_z_max:=4.0 \
   -p thre_radius:=0.1 \
-  -p thres_point_count:=10 \
+  -p thres_point_count:=2 \
   -p flag_pass_through:=false \
   -p map_topic_name:=map &
-PCD2PGM_PID=$!
+PID=$!
 
-# 等 pcd2pgm 加载完成
-sleep 2
+sleep 5
 
-# 3. 保存 PGM
+# 保存地图
+ros2 run nav2_map_server map_saver_cli \
+  -f "${OUT_DIR}/map_${TIMESTAMP}" \
+  -t map --fmt pgm 2>&1 || true
+
+kill $PID 2>/dev/null; wait $PID 2>/dev/null
 echo ""
-echo "[3/3] 保存地图到 maps/..."
-mkdir -p "$SCRIPT_DIR/maps"
-ros2 run nav2_map_server map_saver_cli -f "$SCRIPT_DIR/maps/map" &
-MAP_SAVER_PID=$!
-wait $MAP_SAVER_PID 2>/dev/null || true
-
-# 清理
-kill $PCD2PGM_PID 2>/dev/null || true
-wait $PCD2PGM_PID 2>/dev/null || true
-
-echo ""
-echo "========== 完成 =========="
-echo "地图文件:"
-ls -lh "$SCRIPT_DIR/maps/"*
+echo "完成: ${OUT_DIR}/map_${TIMESTAMP}.pgm"
