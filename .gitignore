@@ -18,3 +18,4 @@ __pycache__/
 
 # Local settings
 .claude/settings.local.json
+src/faster-lio/Log/
