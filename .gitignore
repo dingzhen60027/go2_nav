@@ -1,0 +1,20 @@
+# ROS2 build artifacts
+build/
+install/
+log/
+
+# Generated PCD / maps
+src/faster-lio/PCD/
+PCD/
+maps/
+
+# IDE
+.vscode/
+.idea/
+
+# Python
+__pycache__/
+*.pyc
+
+# Local settings
+.claude/settings.local.json
