@@ -1,0 +1,9 @@
+fast_icp_loc:
+  ros__parameters:
+    map_pcd: "/home/wjg/go2_nav/maps/clean/pcd_icp_latest.pcd"
+    scan_topic: "/livox/lidar"
+    world_frame: "map"
+    body_frame: "base_link"
+    voxel_leaf: 0.25
+    max_corr_dist: 1.5
+    max_iterations: 15
