@@ -34,6 +34,9 @@ private:
   std::string body_frame_;
   double voxel_leaf_;
   double max_corr_dist_;
+  double max_translation_delta_;
+  double max_yaw_delta_;
+  double max_fitness_score_;
   int max_iter_;
 
   // ---- map ----

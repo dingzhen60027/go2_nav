@@ -5,10 +5,21 @@
 #include <pcl_conversions/pcl_conversions.h>
 #include <tf2/LinearMath/Quaternion.h>
 #include <Eigen/Dense>
+#include <cmath>
 
 namespace fast_icp_loc {
 
 static constexpr int IMU_INIT_COUNT = 50;  // 采集 50 帧 IMU（~0.25s @ 200Hz）
+
+static double normalizeAngle(double angle) {
+  while (angle > M_PI) angle -= 2.0 * M_PI;
+  while (angle < -M_PI) angle += 2.0 * M_PI;
+  return angle;
+}
+
+static double yawFromPose(const Eigen::Matrix4d &pose) {
+  return std::atan2(pose(1, 0), pose(0, 0));
+}
 
 FastIcpLoc::FastIcpLoc(const rclcpp::NodeOptions &options)
     : Node("fast_icp_loc", options), map_loaded_(false), localized_(false),
@@ -20,6 +31,9 @@ FastIcpLoc::FastIcpLoc(const rclcpp::NodeOptions &options)
   body_frame_    = this->declare_parameter("body_frame", "livox_frame");
   voxel_leaf_    = this->declare_parameter("voxel_leaf", 0.15);
   max_corr_dist_ = this->declare_parameter("max_corr_dist", 2.0);
+  max_translation_delta_ = this->declare_parameter("max_translation_delta", 0.45);
+  max_yaw_delta_ = this->declare_parameter("max_yaw_delta", 0.60);
+  max_fitness_score_ = this->declare_parameter("max_fitness_score", 1.0);
   max_iter_      = this->declare_parameter("max_iterations", 30);
 
   loadMap();
@@ -184,7 +198,26 @@ void FastIcpLoc::scanCallback(livox_ros_driver2::msg::CustomMsg::SharedPtr msg) 
   icp.align(*aligned, last_pose_.cast<float>());
 
   if (icp.hasConverged()) {
-    last_pose_ = icp.getFinalTransformation().cast<double>();
+    const Eigen::Matrix4d candidate = icp.getFinalTransformation().cast<double>();
+    const Eigen::Vector3d delta_t =
+        candidate.block<3, 1>(0, 3) - last_pose_.block<3, 1>(0, 3);
+    const double translation_delta = delta_t.head<2>().norm();
+    const double yaw_delta =
+        std::abs(normalizeAngle(yawFromPose(candidate) - yawFromPose(last_pose_)));
+    const double fitness_score = icp.getFitnessScore(max_corr_dist_);
+
+    if (translation_delta > max_translation_delta_ ||
+        yaw_delta > max_yaw_delta_ ||
+        fitness_score > max_fitness_score_) {
+      RCLCPP_WARN_THROTTLE(
+          get_logger(), *this->get_clock(), 1000,
+          "Reject ICP jump: trans=%.3fm yaw=%.3frad fitness=%.3f "
+          "(limits %.3fm %.3frad %.3f)",
+          translation_delta, yaw_delta, fitness_score,
+          max_translation_delta_, max_yaw_delta_, max_fitness_score_);
+    } else {
+      last_pose_ = candidate;
+    }
   } else {
     RCLCPP_WARN_THROTTLE(get_logger(), *this->get_clock(), 2000,
                          "ICP not converged, keeping last pose");
