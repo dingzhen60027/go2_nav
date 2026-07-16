@@ -1,6 +1,7 @@
 <!--
   Replans at 1 Hz, smooths the global path, then follows the smoothed path.
-  This keeps the existing recovery behavior while making turns less jagged.
+  Recovery actions are intentionally conservative for ICP-based Go2 navigation:
+  no large-angle spin, short waits, and short backup before global clearing.
 -->
 <root main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
@@ -9,25 +10,34 @@
         <RateController hz="1.0">
           <RecoveryNode number_of_retries="1" name="ComputePathToPose">
             <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
-            <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
+            <Sequence name="PlanningContextRecovery">
+              <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
+              <Wait wait_duration="1"/>
+            </Sequence>
           </RecoveryNode>
         </RateController>
         <SmoothPath unsmoothed_path="{path}" smoothed_path="{smoothed_path}" smoother_id="simple_smoother" max_smoothing_duration="0.15" check_for_collisions="true"/>
         <RecoveryNode number_of_retries="1" name="FollowPath">
           <FollowPath path="{smoothed_path}" controller_id="FollowPath"/>
-          <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
+          <Sequence name="ControlContextRecovery">
+            <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
+            <Wait wait_duration="1"/>
+          </Sequence>
         </RecoveryNode>
       </PipelineSequence>
       <ReactiveFallback name="RecoveryFallback">
         <GoalUpdated/>
         <RoundRobin name="RecoveryActions">
-          <Sequence name="ClearingActions">
+          <Sequence name="LocalRefresh">
             <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
-            <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
+            <Wait wait_duration="1"/>
           </Sequence>
-          <Spin spin_dist="1.57"/>
-          <Wait wait_duration="5"/>
-          <BackUp backup_dist="0.30" backup_speed="0.05"/>
+          <BackUp backup_dist="0.18" backup_speed="0.05"/>
+          <Sequence name="GlobalRefresh">
+            <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
+            <Wait wait_duration="1"/>
+          </Sequence>
+          <Spin spin_dist="0.30"/>
         </RoundRobin>
       </ReactiveFallback>
     </RecoveryNode>
