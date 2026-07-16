@@ -46,8 +46,9 @@ echo "[3/6] Fast ICP 定位..."
 ros2 launch fast_icp_loc fast_icp_loc.launch.py &
 sleep 2
 
-# 4. Go2 桥接
-echo "[4/6] Go2 bridge..."
+# 4. Go2 velocity adapter + bridge
+echo "[4/6] Go2 cmd adapter + bridge..."
+ros2 run go2_bridge go2_cmd_adapter &
 ros2 run go2_bridge go2_bridge &
 sleep 1
 

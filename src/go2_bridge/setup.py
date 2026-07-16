@@ -20,6 +20,7 @@ setup(
     entry_points={
         'console_scripts': [
             'go2_bridge = go2_bridge.bridge:main',
+            'go2_cmd_adapter = go2_bridge.cmd_adapter:main',
         ],
     },
 )

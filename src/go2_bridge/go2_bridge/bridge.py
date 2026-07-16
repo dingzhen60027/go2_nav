@@ -29,7 +29,7 @@ class Go2Bridge(Node):
     def __init__(self):
         super().__init__("go2_bridge")
 
-        self.declare_parameter("cmd_vel_topic", "/cmd_vel")
+        self.declare_parameter("cmd_vel_topic", "/cmd_vel_go2")
         self.declare_parameter("sport_request_topic", "/api/sport/request")
         self.declare_parameter("lin_vel_max", 1.5)
         self.declare_parameter("ang_vel_max", 1.5)
@@ -49,12 +49,13 @@ class Go2Bridge(Node):
 
     def _on_cmd_vel(self, msg: Twist):
         vx = max(-self.lin_max, min(self.lin_max, msg.linear.x))
+        vy = max(-self.lin_max, min(self.lin_max, msg.linear.y))
         vz = max(-self.ang_max, min(self.ang_max, msg.angular.z))
 
         req = Request()
         req.header.identity.api_id = API_ID["MOVE"]
         req.parameter = json.dumps({"x": round(vx, 3),
-                                     "y": round(msg.linear.y, 3),
+                                     "y": round(vy, 3),
                                      "z": round(vz, 3)})
         self.request_pub.publish(req)
 
