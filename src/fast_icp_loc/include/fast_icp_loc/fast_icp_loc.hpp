@@ -26,8 +26,6 @@ private:
   void initPoseCallback(geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg);
   void imuCallback(sensor_msgs::msg::Imu::SharedPtr msg);
   void publishPose(const Eigen::Matrix4d &T);
-  bool shouldAcceptIcpResult(const Eigen::Matrix4d &candidate, double fitness_score);
-  bool inInitialConvergence() const;
 
   // ---- params ----
   std::string map_pcd_path_;
@@ -39,8 +37,6 @@ private:
   double max_translation_delta_;
   double max_yaw_delta_;
   double max_fitness_score_;
-  double init_max_fitness_score_;
-  int init_convergence_frames_;
   int max_iter_;
 
   // ---- map ----
@@ -52,7 +48,6 @@ private:
   bool map_loaded_;
   bool localized_;
   bool leveling_done_;
-  int init_convergence_left_;
   int imu_count_;
   Eigen::Vector3d imu_acc_sum_;
 

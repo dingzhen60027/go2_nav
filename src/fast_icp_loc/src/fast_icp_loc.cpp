@@ -23,7 +23,7 @@ static double yawFromPose(const Eigen::Matrix4d &pose) {
 
 FastIcpLoc::FastIcpLoc(const rclcpp::NodeOptions &options)
     : Node("fast_icp_loc", options), map_loaded_(false), localized_(false),
-      leveling_done_(false), init_convergence_left_(0), imu_count_(0) {
+      leveling_done_(false), imu_count_(0) {
 
   map_pcd_path_  = this->declare_parameter("map_pcd", "/home/wjg/go2_nav/maps/clean/pcd_icp_latest.pcd");
   scan_topic_    = this->declare_parameter("scan_topic", "/livox/lidar");
@@ -34,8 +34,6 @@ FastIcpLoc::FastIcpLoc(const rclcpp::NodeOptions &options)
   max_translation_delta_ = this->declare_parameter("max_translation_delta", 0.45);
   max_yaw_delta_ = this->declare_parameter("max_yaw_delta", 0.60);
   max_fitness_score_ = this->declare_parameter("max_fitness_score", 1.0);
-  init_max_fitness_score_ = this->declare_parameter("init_max_fitness_score", 1.2);
-  init_convergence_frames_ = this->declare_parameter("init_convergence_frames", 10);
   max_iter_      = this->declare_parameter("max_iterations", 30);
 
   loadMap();
@@ -148,49 +146,7 @@ void FastIcpLoc::initPoseCallback(geometry_msgs::msg::PoseWithCovarianceStamped:
   last_pose_(1,3) = p.y;
   last_pose_(2,3) = p.z;
   localized_ = true;
-  init_convergence_left_ = init_convergence_frames_;
-  RCLCPP_INFO(
-      get_logger(),
-      "Initial pose: (%.2f, %.2f, %.2f), allow %d ICP convergence frames",
-      p.x, p.y, p.z, init_convergence_left_);
-}
-
-bool FastIcpLoc::inInitialConvergence() const {
-  return init_convergence_left_ > 0;
-}
-
-bool FastIcpLoc::shouldAcceptIcpResult(const Eigen::Matrix4d &candidate,
-                                       double fitness_score) {
-  if (inInitialConvergence()) {
-    if (fitness_score > init_max_fitness_score_) {
-      RCLCPP_WARN_THROTTLE(
-          get_logger(), *this->get_clock(), 1000,
-          "Reject initial ICP result: fitness=%.3f (limit %.3f), frames left=%d",
-          fitness_score, init_max_fitness_score_, init_convergence_left_);
-      return false;
-    }
-    return true;
-  }
-
-  const Eigen::Vector3d delta_t =
-      candidate.block<3, 1>(0, 3) - last_pose_.block<3, 1>(0, 3);
-  const double translation_delta = delta_t.head<2>().norm();
-  const double yaw_delta =
-      std::abs(normalizeAngle(yawFromPose(candidate) - yawFromPose(last_pose_)));
-
-  if (translation_delta > max_translation_delta_ ||
-      yaw_delta > max_yaw_delta_ ||
-      fitness_score > max_fitness_score_) {
-    RCLCPP_WARN_THROTTLE(
-        get_logger(), *this->get_clock(), 1000,
-        "Reject ICP jump: trans=%.3fm yaw=%.3frad fitness=%.3f "
-        "(limits %.3fm %.3frad %.3f)",
-        translation_delta, yaw_delta, fitness_score,
-        max_translation_delta_, max_yaw_delta_, max_fitness_score_);
-    return false;
-  }
-
-  return true;
+  RCLCPP_INFO(get_logger(), "Initial pose: (%.2f, %.2f, %.2f), start tracking", p.x, p.y, p.z);
 }
 
 void FastIcpLoc::scanCallback(livox_ros_driver2::msg::CustomMsg::SharedPtr msg) {
@@ -243,13 +199,24 @@ void FastIcpLoc::scanCallback(livox_ros_driver2::msg::CustomMsg::SharedPtr msg) 
 
   if (icp.hasConverged()) {
     const Eigen::Matrix4d candidate = icp.getFinalTransformation().cast<double>();
+    const Eigen::Vector3d delta_t =
+        candidate.block<3, 1>(0, 3) - last_pose_.block<3, 1>(0, 3);
+    const double translation_delta = delta_t.head<2>().norm();
+    const double yaw_delta =
+        std::abs(normalizeAngle(yawFromPose(candidate) - yawFromPose(last_pose_)));
     const double fitness_score = icp.getFitnessScore(max_corr_dist_);
 
-    if (shouldAcceptIcpResult(candidate, fitness_score)) {
+    if (translation_delta > max_translation_delta_ ||
+        yaw_delta > max_yaw_delta_ ||
+        fitness_score > max_fitness_score_) {
+      RCLCPP_WARN_THROTTLE(
+          get_logger(), *this->get_clock(), 1000,
+          "Reject ICP jump: trans=%.3fm yaw=%.3frad fitness=%.3f "
+          "(limits %.3fm %.3frad %.3f)",
+          translation_delta, yaw_delta, fitness_score,
+          max_translation_delta_, max_yaw_delta_, max_fitness_score_);
+    } else {
       last_pose_ = candidate;
-    }
-    if (init_convergence_left_ > 0) {
-      init_convergence_left_--;
     }
   } else {
     RCLCPP_WARN_THROTTLE(get_logger(), *this->get_clock(), 2000,
