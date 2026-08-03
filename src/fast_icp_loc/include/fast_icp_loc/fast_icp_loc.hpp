@@ -1,4 +1,6 @@
 #pragma once
+#include "fast_icp_loc/imu_deskewer.hpp"
+
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <livox_ros_driver2/msg/custom_msg.hpp>
@@ -11,7 +13,10 @@
 #include <pcl/filters/voxel_grid.h>
 #include <pcl_conversions/pcl_conversions.h>
 #include <Eigen/Dense>
+#include <cstdint>
+#include <deque>
 #include <memory>
+#include <string>
 
 namespace fast_icp_loc {
 
@@ -25,18 +30,32 @@ private:
   void scanCallback(livox_ros_driver2::msg::CustomMsg::SharedPtr msg);
   void initPoseCallback(geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg);
   void imuCallback(sensor_msgs::msg::Imu::SharedPtr msg);
-  void publishPose(const Eigen::Matrix4d &T);
+  void processPendingScans();
+  void processScan(const livox_ros_driver2::msg::CustomMsg::SharedPtr &msg,
+                   int64_t scan_start_ns, int64_t scan_end_ns);
+  bool scanTimeRange(const livox_ros_driver2::msg::CustomMsg &msg,
+                     int64_t *scan_start_ns, int64_t *scan_end_ns) const;
+  void pruneImuBuffer();
+  void publishPose(const Eigen::Matrix4d &T, const rclcpp::Time &stamp);
 
   // ---- params ----
   std::string map_pcd_path_;
   std::string scan_topic_;
+  std::string imu_topic_;
   std::string world_frame_;
   std::string body_frame_;
+  std::string lidar_frame_;
   double voxel_leaf_;
   double max_corr_dist_;
   double max_translation_delta_;
   double max_yaw_delta_;
   double max_fitness_score_;
+  bool deskew_enabled_;
+  double max_imu_gap_sec_;
+  double max_scan_duration_sec_;
+  double imu_buffer_duration_sec_;
+  double imu_init_max_gyro_;
+  int max_pending_scans_;
   int max_iter_;
 
   // ---- map ----
@@ -50,6 +69,15 @@ private:
   bool leveling_done_;
   int imu_count_;
   Eigen::Vector3d imu_acc_sum_;
+  Eigen::Vector3d imu_gyro_sum_;
+  Eigen::Vector3d gyro_bias_;
+  Eigen::Matrix3d rotation_lidar_from_imu_;
+  std::deque<ImuSample> imu_buffer_;
+  std::deque<livox_ros_driver2::msg::CustomMsg::SharedPtr> pending_scans_;
+  int64_t last_imu_stamp_ns_{0};
+  int64_t last_scan_stamp_ns_{0};
+  uint64_t deskewed_scan_count_{0};
+  uint64_t dropped_scan_count_{0};
 
   // ---- pubs/subs ----
   rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr scan_sub_;

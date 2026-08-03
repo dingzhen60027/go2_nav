@@ -24,6 +24,7 @@ include_directories(
 )
 
 add_library(${PROJECT_NAME} SHARED
+  src/imu_deskewer.cpp
   src/fast_icp_loc.cpp
 )
 
@@ -49,5 +50,17 @@ install(TARGETS ${PROJECT_NAME} fast_icp_loc_node
 install(DIRECTORY launch config rviz
   DESTINATION share/${PROJECT_NAME}
 )
+
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_imu_deskewer
+    test/test_imu_deskewer.cpp
+    src/imu_deskewer.cpp
+  )
+  target_include_directories(test_imu_deskewer PRIVATE
+    include
+    ${EIGEN3_INCLUDE_DIR}
+  )
+endif()
 
 ament_package()

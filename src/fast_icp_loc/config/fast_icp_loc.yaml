@@ -2,8 +2,20 @@ fast_icp_loc:
   ros__parameters:
     map_pcd: "/home/wjg/go2_nav/maps/clean/pcd_icp_latest.pcd"
     scan_topic: "/livox/lidar"
+    imu_topic: "/livox/imu"
     world_frame: "map"
     body_frame: "base_link"
+    lidar_frame: "livox_frame"
+    deskew_enabled: true
+    max_imu_gap_sec: 0.02
+    max_scan_duration_sec: 0.15
+    imu_buffer_duration_sec: 2.0
+    imu_init_max_gyro: 0.10
+    max_pending_scans: 3
+    # MID360 built-in IMU and LiDAR use aligned axes in the current installation.
+    rotation_lidar_from_imu: [1.0, 0.0, 0.0,
+                              0.0, 1.0, 0.0,
+                              0.0, 0.0, 1.0]
     voxel_leaf: 0.25
     max_corr_dist: 1.5
     max_translation_delta: 0.45
