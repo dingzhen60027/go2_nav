@@ -15,7 +15,7 @@ class Go2CmdAdapter(Node):
         self.declare_parameter("cmd_vel_out_topic", "/cmd_vel_go2")
         self.declare_parameter("linear_deadband", 0.08)
         self.declare_parameter("min_translation_speed", 0.22)
-        self.declare_parameter("max_boost_ratio", 1.9)
+        self.declare_parameter("max_boost_ratio", 2.2)
         self.declare_parameter("rotate_wz_threshold", 0.25)
         self.declare_parameter("rotate_linear_threshold", 0.16)
         self.declare_parameter("max_linear_accel", 0.8)

@@ -103,7 +103,7 @@ Adapter rules:
   - then clear `vx/vy` and keep `wz`.
 - If planar speed is below `0.08`, clear `vx/vy`.
 - If planar speed is below `0.22`, boost the x/y vector without changing its
-  direction, limited by `max_boost_ratio: 1.9`.
+  direction, limited by `max_boost_ratio: 2.2`.
 - Limit command acceleration:
   - planar axes: `0.8 m/s^2`
   - yaw: `1.5 rad/s^2`
