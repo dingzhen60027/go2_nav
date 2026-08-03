@@ -1,24 +1,45 @@
 #!/bin/bash
 # start_navigation.sh — 一键启动: MID360 + ICP 定位 + Nav2 导航 + RViz
 
+CLEANED=0
 cleanup() {
+    [ "$CLEANED" -eq 1 ] && return
+    CLEANED=1
+    trap - SIGINT SIGTERM EXIT
     echo ""
     echo "Shutting down..."
-    # 杀所有子进程
-    jobs -p | xargs -r kill 2>/dev/null
+    jobs -pr | xargs -r kill -INT 2>/dev/null || true
     sleep 1
-    jobs -p | xargs -r kill -9 2>/dev/null
-    # 确保容器进程也清理
+    jobs -pr | xargs -r kill -TERM 2>/dev/null || true
+    sleep 1
+    jobs -pr | xargs -r kill -KILL 2>/dev/null || true
     pkill -f "component_container_isolated" 2>/dev/null || true
     pkill -f "nav2_container" 2>/dev/null || true
     echo "Done."
+}
+shutdown() {
+    cleanup
     exit 0
 }
-trap cleanup SIGINT SIGTERM EXIT
+trap shutdown SIGINT SIGTERM
+trap cleanup EXIT
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source /opt/ros/humble/setup.bash
 source "$SCRIPT_DIR/install/setup.bash"
+
+ACTIVE_MAP_DIR="${GO2_MAP_DIR:-$SCRIPT_DIR/maps/active}"
+if [ ! -f "$ACTIVE_MAP_DIR/manifest.yaml" ] || \
+   [ ! -f "$ACTIVE_MAP_DIR/map.yaml" ] || \
+   [ ! -f "$ACTIVE_MAP_DIR/localization.pcd" ]; then
+    echo "ERROR: 没有完整的已激活地图包。"
+    echo "先运行 ./start_map_manager.sh，在网页中选择并激活地图。"
+    exit 1
+fi
+NAV_MAP_YAML="$(readlink -f "$ACTIVE_MAP_DIR/map.yaml")"
+ICP_MAP_PCD="$(readlink -f "$ACTIVE_MAP_DIR/localization.pcd")"
+ACTIVE_MAP_ID="$(basename "$(readlink -f "$ACTIVE_MAP_DIR")")"
+
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 IFACE="${GO2_IFACE:-enx6c1ff7bc241e}"
 export CYCLONEDDS_URI="<CycloneDDS><Domain><General><Interfaces>
@@ -28,6 +49,9 @@ echo "DDS bound to: ${IFACE}"
 
 echo "=============================="
 echo "  FAST ICP + Nav2 导航"
+echo "  地图版本: $ACTIVE_MAP_ID"
+echo "  Nav2: $NAV_MAP_YAML"
+echo "  ICP:  $ICP_MAP_PCD"
 echo "=============================="
 
 # 1. Livox MID360 驱动
@@ -43,7 +67,7 @@ sleep 1
 
 # 3. Fast ICP 定位
 echo "[3/6] Fast ICP 定位..."
-ros2 launch fast_icp_loc fast_icp_loc.launch.py &
+ros2 launch fast_icp_loc fast_icp_loc.launch.py map_pcd:="$ICP_MAP_PCD" &
 sleep 2
 
 # 4. Go2 velocity adapter + bridge
@@ -58,7 +82,7 @@ ros2 launch nav2_bringup bringup_launch.py \
   params_file:="$SCRIPT_DIR/nav2_config/nav2_params.yaml" \
   use_sim_time:=false \
   autostart:=true \
-  map:="$SCRIPT_DIR/maps/map_latest.yaml" &
+  map:="$NAV_MAP_YAML" &
 sleep 2
 
 # 6. RViz
@@ -74,4 +98,3 @@ echo "  - Ctrl+C 退出并清理所有进程"
 echo ""
 
 wait
-cleanup

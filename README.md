@@ -49,11 +49,21 @@ source setup_go2.sh [网卡名]
 
 ### 生成 2D 导航地图
 
+推荐使用本地地图工作台，统一归档原始 PCD、生成 ICP/Nav2 地图并管理当前版本：
+
 ```bash
-./pcd2pgm.sh PCD/xxxxxx.pcd
+./start_map_manager.sh
 ```
 
-输出 `maps/map_TIMESTAMP.{pgm,yaml}`，并自动链接到 `map_latest.{pgm,yaml}`。
+浏览器打开 `http://127.0.0.1:8765`：
+
+1. 点击“归档当前建图”，保存 FASTer-LIO 的最新输出。
+2. 从建图会话生成候选地图，自动完成过滤、切片、PGM/YAML 和 3D 预览。
+3. 检查 2D/3D 地图后点击“设为当前地图”。
+
+定位 PCD 与 Nav2 PGM/YAML 按版本绑定，导航启动脚本只读取 `maps/active`，不再依赖手工填写路径。
+
+旧的 `pcd2pgm.sh` 保留用于兼容历史流程，新开发流程不要用它切换导航地图。
 
 ### 仅定位
 

@@ -3,6 +3,24 @@
 
 set -e
 
+CLEANED=0
+cleanup() {
+    [ "$CLEANED" -eq 1 ] && return
+    CLEANED=1
+    trap - SIGINT SIGTERM EXIT
+    jobs -pr | xargs -r kill -INT 2>/dev/null || true
+    sleep 1
+    jobs -pr | xargs -r kill -TERM 2>/dev/null || true
+    sleep 1
+    jobs -pr | xargs -r kill -KILL 2>/dev/null || true
+}
+shutdown() {
+    cleanup
+    exit 0
+}
+trap shutdown SIGINT SIGTERM
+trap cleanup EXIT
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/install/setup.bash"
 
@@ -38,4 +56,5 @@ echo "  启动后让机器狗静止约 3-5 秒"
 echo "  等终端出现 'IMU Initial Done' 再开始走"
 echo ""
 
-ros2 launch faster_lio mapping_mid360.launch.py
+ros2 launch faster_lio mapping_mid360.launch.py &
+wait $!

@@ -4,9 +4,14 @@
 #include <tf2_ros/transform_broadcaster.h>
 #include <tf2/utils.h>
 #include <yaml-cpp/yaml.h>
+#include <chrono>
+#include <ctime>
 #include <execution>
+#include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <pcl/common/transforms.h>
+#include <sstream>
 
 #include "laser_mapping.h"
 #include "utils.h"
@@ -1159,11 +1164,43 @@ void LaserMapping::Finish() {
             LOG(INFO) << "auto-leveled PCD with gravity rotation";
         }
 
-        std::string file_name = std::string("scans.pcd");
-        std::string all_points_dir(std::string(std::string(ROOT_DIR) + "PCD/") + file_name);
+        const auto now = std::chrono::system_clock::now();
+        const std::time_t now_time = std::chrono::system_clock::to_time_t(now);
+        std::ostringstream timestamp;
+        timestamp << std::put_time(std::localtime(&now_time), "%Y%m%d_%H%M%S");
+
+        const std::string file_name = "scans_" + timestamp.str() + ".pcd";
+        const std::filesystem::path pcd_dir = std::filesystem::path(ROOT_DIR) / "PCD";
+        const std::filesystem::path all_points_dir = pcd_dir / file_name;
         pcl::PCDWriter pcd_writer;
         LOG(INFO) << "current scan saved to /PCD/" << file_name;
-        pcd_writer.writeBinary(all_points_dir, *pcd_to_save);
+        pcd_writer.writeBinary(all_points_dir.string(), *pcd_to_save);
+
+        // Keep every mapping result immutable. scans.pcd remains a compatibility
+        // link for scripts and the map workspace UI that expect the latest capture.
+        const std::filesystem::path latest_path = pcd_dir / "scans.pcd";
+        std::error_code link_error;
+        if (std::filesystem::is_symlink(latest_path, link_error)) {
+            std::filesystem::remove(latest_path, link_error);
+        } else if (std::filesystem::exists(latest_path, link_error)) {
+            const auto legacy_path = pcd_dir / ("scans_legacy_" + timestamp.str() + ".pcd");
+            std::filesystem::rename(latest_path, legacy_path, link_error);
+            if (link_error) {
+                LOG(WARNING) << "failed to preserve previous scans.pcd: " << link_error.message();
+            } else {
+                LOG(INFO) << "previous scans.pcd preserved as " << legacy_path.filename().string();
+            }
+        }
+
+        if (!std::filesystem::exists(latest_path) && !std::filesystem::is_symlink(latest_path)) {
+            link_error.clear();
+            std::filesystem::create_symlink(file_name, latest_path, link_error);
+            if (link_error) {
+                LOG(WARNING) << "failed to update scans.pcd link: " << link_error.message();
+            } else {
+                LOG(INFO) << "latest mapping link: scans.pcd -> " << file_name;
+            }
+        }
     }
 
     LOG(INFO) << "finish done";
