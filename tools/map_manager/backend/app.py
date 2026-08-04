@@ -70,6 +70,7 @@ class ActivateRequest(BaseModel):
 
 class RuntimeRequest(BaseModel):
     mode: Literal["mapping", "localization", "navigation"]
+    algorithm: Literal["faster_lio", "fastlio2"] | None = None
 
 
 class TrashRequest(BaseModel):
@@ -79,6 +80,7 @@ class TrashRequest(BaseModel):
 
 job_lock = threading.Lock()
 process_lock = threading.Lock()
+session_preview_lock = threading.Lock()
 managed_processes: set[subprocess.Popen[Any]] = set()
 job_cancel_event = threading.Event()
 job_thread: threading.Thread | None = None
@@ -167,6 +169,30 @@ def file_info(path: Path) -> dict[str, Any] | None:
     }
 
 
+def capture_identity(path: Path) -> dict[str, int] | None:
+    try:
+        stat = path.stat()
+    except (FileNotFoundError, OSError):
+        return None
+    return {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+
+
+def runtime_output_root() -> Path:
+    return WORKSPACE_ROOT / "runtime"
+
+
+def is_safe_capture_path(path: Path) -> bool:
+    absolute = path.absolute()
+    if absolute == CURRENT_RAW_PCD.absolute():
+        return True
+    root = runtime_output_root().resolve()
+    try:
+        absolute.resolve(strict=False).relative_to(root)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
 def session_dir(session_id: str) -> Path:
     return SESSIONS_ROOT / require_id(session_id)
 
@@ -213,9 +239,11 @@ def list_sessions() -> list[dict[str, Any]]:
             "name": metadata.get("name", path.name),
             "site": metadata.get("site", "default"),
             "note": metadata.get("note", ""),
+            "algorithm": metadata.get("algorithm", "unknown"),
             "created_at": metadata.get("created_at"),
             "raw": file_info(raw),
             "complete": raw.exists(),
+            "cloud_preview_url": f"/api/sessions/{path.name}/cloud.ply" if raw.exists() else None,
         })
     return items
 
@@ -244,6 +272,7 @@ def list_versions() -> list[dict[str, Any]]:
             "note": manifest.get("note", ""),
             "created_at": manifest.get("created_at"),
             "source_session": manifest.get("source_session"),
+            "mapping_algorithm": manifest.get("mapping_algorithm", "unknown"),
             "parameters": manifest.get("parameters", {}),
             "origin": manifest.get("origin", "managed"),
             "status": status,
@@ -314,24 +343,74 @@ def list_trash() -> list[dict[str, Any]]:
 
 
 def current_capture() -> dict[str, Any]:
-    info = file_info(CURRENT_RAW_PCD)
-    archived_session_id = None
+    runtime = runtime_manager.snapshot()
+    configured_path = runtime.get("capture_path") if runtime.get("mode") == "mapping" else None
+    source_path = Path(configured_path) if configured_path else CURRENT_RAW_PCD
+    if not is_safe_capture_path(source_path):
+        source_path = CURRENT_RAW_PCD
+    info = file_info(source_path)
+    identity = capture_identity(source_path) if info else None
+    resolved_name = source_path.resolve().name if info else ""
+    algorithm = runtime.get("algorithm") if runtime.get("mode") == "mapping" else None
+    if not algorithm:
+        algorithm = "fastlio2" if resolved_name.startswith("fastlio2_scans_") else "faster_lio"
+    archived_session_id = runtime.get("capture_session_id") if runtime.get("capture_status") == "archived" else None
     if info:
         for session_path in SESSIONS_ROOT.iterdir():
             raw = session_path / "raw.pcd"
             if not raw.exists():
                 continue
-            stat = raw.stat()
-            if stat.st_size == info["size"] and int(stat.st_mtime) == int(CURRENT_RAW_PCD.stat().st_mtime):
+            metadata_path = session_path / "session.yaml"
+            metadata = load_yaml(metadata_path) if metadata_path.exists() else {}
+            same_run = not runtime.get("run_id") or metadata.get("run_id") == runtime.get("run_id")
+            if metadata.get("source_identity") == identity and same_run:
                 archived_session_id = session_path.name
                 break
+            raw_identity = capture_identity(raw)
+            if not runtime.get("run_id") and not metadata.get("source_identity") and raw_identity == identity:
+                archived_session_id = session_path.name
+                break
+    new_for_run = bool(
+        info
+        and runtime.get("mode") == "mapping"
+        and runtime.get("run_id")
+        and runtime.get("capture_status") == "pending"
+        and identity != runtime.get("capture_baseline")
+    )
     return {
         "available": info is not None,
         "file": info,
-        "source_path": str(CURRENT_RAW_PCD),
+        "source_path": str(source_path),
+        "algorithm": algorithm,
         "archived": archived_session_id is not None,
         "archived_session_id": archived_session_id,
+        "run_id": runtime.get("run_id"),
+        "new_for_run": new_for_run,
+        "source_identity": identity,
     }
+
+
+def remove_capture_output(capture: dict[str, Any]) -> None:
+    runtime = runtime_manager.snapshot()
+    capture_dir_value = runtime.get("capture_dir")
+    if capture_dir_value:
+        capture_dir = Path(capture_dir_value)
+        root = runtime_output_root().resolve()
+        try:
+            capture_dir.resolve(strict=False).relative_to(root)
+        except (OSError, ValueError) as exc:
+            raise RuntimeError("拒绝清理工作区之外的建图目录") from exc
+        shutil.rmtree(capture_dir, ignore_errors=False)
+        return
+
+    source = Path(capture["source_path"])
+    if source.absolute() != CURRENT_RAW_PCD.absolute():
+        raise RuntimeError("拒绝清理未纳管的建图文件")
+    resolved = source.resolve(strict=False)
+    if source.is_symlink() or source.exists():
+        source.unlink()
+    if resolved != source.absolute() and resolved.parent == CURRENT_RAW_PCD.parent.resolve() and resolved.exists():
+        resolved.unlink()
 
 
 def job_snapshot() -> dict[str, Any]:
@@ -406,10 +485,11 @@ def cancel_map_job() -> dict[str, Any]:
     return job_snapshot()
 
 
-def run_command(command: list[str], label: str, timeout: int = 180) -> None:
-    if job_cancel_event.is_set():
+def run_command(command: list[str], label: str, timeout: int = 180, track_job: bool = True) -> None:
+    if track_job and job_cancel_event.is_set():
         raise RuntimeError("地图任务已取消")
-    log_job(label)
+    if track_job:
+        log_job(label)
     process = start_managed_process(
         command,
         text=True,
@@ -424,26 +504,34 @@ def run_command(command: list[str], label: str, timeout: int = 180) -> None:
             raise RuntimeError(f"{label}超时") from exc
     finally:
         unregister_process(process)
-    for line in output.splitlines()[-20:]:
-        log_job(line)
+    if track_job:
+        for line in output.splitlines()[-20:]:
+            log_job(line)
     if process.returncode != 0:
-        if job_cancel_event.is_set():
+        if track_job and job_cancel_event.is_set():
             raise RuntimeError("地图任务已取消")
         raise RuntimeError(f"{label}失败，退出码 {process.returncode}")
 
 
-def generate_cloud_preview(source: Path, output: Path, leaf: float = 0.25) -> None:
+def generate_cloud_preview(
+    source: Path,
+    output: Path,
+    leaf: float = 0.25,
+    track_job: bool = True,
+) -> None:
     temp_pcd = output.with_suffix(".preview.pcd")
     try:
         run_command(
             ["pcl_voxel_grid", str(source), str(temp_pcd), "-leaf", f"{leaf},{leaf},{leaf}"],
             "生成 3D 预览降采样",
             timeout=120,
+            track_job=track_job,
         )
         run_command(
             ["pcl_pcd2ply", "-format", "1", "-use_camera", "0", str(temp_pcd), str(output)],
             "生成浏览器点云预览",
             timeout=120,
+            track_job=track_job,
         )
     finally:
         temp_pcd.unlink(missing_ok=True)
@@ -555,6 +643,7 @@ def build_version_worker(request: BuildRequest, version_id: str) -> None:
             "created_at": now_iso(),
             "source_session": request.session_id,
             "origin": "managed",
+            "mapping_algorithm": session_meta.get("algorithm", "unknown"),
             "parameters": {
                 "statistical_mean_k": 20,
                 "statistical_std_dev_mul": 0.5,
@@ -617,6 +706,17 @@ def cleanup_temporary_outputs() -> None:
     for temporary in temporary_paths:
         if temporary.is_dir():
             shutil.rmtree(temporary, ignore_errors=True)
+    runtime = runtime_manager.snapshot()
+    retained = (
+        Path(runtime["capture_dir"]).resolve(strict=False)
+        if runtime.get("capture_dir") and runtime.get("capture_status") == "pending"
+        else None
+    )
+    output_root = runtime_output_root()
+    if output_root.exists():
+        for path in output_root.iterdir():
+            if path.is_dir() and path.resolve(strict=False) != retained:
+                shutil.rmtree(path, ignore_errors=True)
 
 
 @asynccontextmanager
@@ -674,11 +774,42 @@ def start_runtime(request: RuntimeRequest) -> dict[str, Any]:
         active = read_state().get("active_id")
         if not active or validate_version(version_dir(active)):
             raise HTTPException(status_code=409, detail="请先激活一个完整地图版本")
+    previous_capture = current_capture()
+    if previous_capture["new_for_run"] and not previous_capture["archived"]:
+        raise HTTPException(status_code=409, detail="上一次建图结果尚未保存或丢弃")
+
+    algorithm = (request.algorithm or "faster_lio") if request.mode == "mapping" else None
+    run_id = make_id("run") if request.mode == "mapping" else None
+    capture_path: Path | None = None
+    capture_dir: Path | None = None
+    capture_baseline = None
+    environment = None
+    if request.mode == "mapping":
+        if algorithm == "fastlio2":
+            capture_dir = runtime_output_root() / run_id
+            capture_dir.mkdir(parents=True, exist_ok=False)
+            capture_path = capture_dir / "scans.pcd"
+            environment = {"GO2_MAPPING_OUTPUT_DIR": str(capture_dir)}
+        else:
+            capture_path = CURRENT_RAW_PCD
+            capture_baseline = capture_identity(capture_path)
     try:
-        return runtime_manager.start(request.mode)
+        return runtime_manager.start(
+            request.mode,
+            algorithm,
+            environment=environment,
+            run_id=run_id,
+            capture_path=capture_path,
+            capture_dir=capture_dir,
+            capture_baseline=capture_baseline,
+        )
     except (RuntimeError, ValueError) as exc:
+        if capture_dir:
+            shutil.rmtree(capture_dir, ignore_errors=True)
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except OSError as exc:
+        if capture_dir:
+            shutil.rmtree(capture_dir, ignore_errors=True)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
@@ -688,6 +819,20 @@ def stop_runtime() -> dict[str, Any]:
     return {**result, "current_capture": current_capture()}
 
 
+@app.post("/api/runtime/discard-mapping")
+def discard_mapping() -> dict[str, Any]:
+    runtime_manager.stop()
+    capture = current_capture()
+    if not capture["new_for_run"]:
+        raise HTTPException(status_code=409, detail="本次建图没有生成可丢弃的新 PCD")
+    try:
+        remove_capture_output(capture)
+        runtime_manager.mark_capture("discarded")
+    except (OSError, RuntimeError) as exc:
+        raise HTTPException(status_code=500, detail=f"建图结果清理失败: {exc}") from exc
+    return {"discarded": True, "run_id": capture["run_id"], "current_capture": current_capture()}
+
+
 @app.post("/api/jobs/cancel")
 def cancel_job() -> dict[str, Any]:
     return cancel_map_job()
@@ -695,18 +840,25 @@ def cancel_job() -> dict[str, Any]:
 
 @app.post("/api/sessions/archive")
 def archive_session(request: ArchiveRequest) -> dict[str, Any]:
-    if runtime_manager.snapshot()["mode"] == "mapping" and runtime_manager.snapshot()["status"] in {"running", "stopping"}:
+    runtime = runtime_manager.snapshot()
+    if runtime.get("mode") == "mapping" and runtime.get("status") in {"running", "stopping"}:
         raise HTTPException(status_code=409, detail="请先结束建图，再归档输出")
-    if not CURRENT_RAW_PCD.exists():
-        raise HTTPException(status_code=404, detail="当前没有可归档的 scans.pcd")
-    if current_capture()["archived"]:
+    capture = current_capture()
+    if not capture["available"]:
+        raise HTTPException(status_code=404, detail="本次建图没有生成可归档的 PCD")
+    if capture["archived"]:
         raise HTTPException(status_code=409, detail="当前建图结果已经保存")
+    if not capture["new_for_run"]:
+        raise HTTPException(status_code=409, detail="检测到的是旧 PCD，不属于本次建图")
+    source_path = Path(capture["source_path"])
+    if not is_safe_capture_path(source_path):
+        raise HTTPException(status_code=409, detail="建图结果不在受管目录中")
     session_id = make_id("session")
     target = session_dir(session_id)
     temp = SESSIONS_ROOT / f".{session_id}.copying"
     temp.mkdir(parents=True, exist_ok=False)
     try:
-        shutil.copy2(CURRENT_RAW_PCD, temp / "raw.pcd")
+        shutil.copy2(source_path, temp / "raw.pcd")
         save_yaml(temp / "session.yaml", {
             "schema": 1,
             "id": session_id,
@@ -714,13 +866,23 @@ def archive_session(request: ArchiveRequest) -> dict[str, Any]:
             "site": request.site,
             "note": request.note,
             "created_at": now_iso(),
-            "source_path": str(CURRENT_RAW_PCD),
+            "source_path": str(source_path),
+            "source_identity": capture["source_identity"],
+            "run_id": capture["run_id"],
+            "algorithm": capture["algorithm"],
         })
         os.replace(temp, target)
     except Exception:
         shutil.rmtree(temp, ignore_errors=True)
         raise
-    return {"session_id": session_id}
+    runtime_manager.mark_capture("archived", session_id)
+    cleanup_warning = None
+    if runtime_manager.snapshot().get("capture_dir"):
+        try:
+            remove_capture_output(capture)
+        except (OSError, RuntimeError) as exc:
+            cleanup_warning = str(exc)
+    return {"session_id": session_id, "cleanup_warning": cleanup_warning}
 
 
 @app.post("/api/versions/build", status_code=202)
@@ -797,6 +959,10 @@ def adopt_current(request: AdoptRequest) -> dict[str, Any]:
 
 @app.post("/api/active")
 def activate(request: ActivateRequest) -> dict[str, Any]:
+    if job_snapshot()["running"]:
+        raise HTTPException(status_code=409, detail="地图构建任务进行中，不能切换当前地图")
+    if runtime_manager.snapshot()["status"] in {"running", "stopping"}:
+        raise HTTPException(status_code=409, detail="请先停止定位、导航或建图，再切换当前地图")
     target = version_dir(request.version_id)
     if not target.exists():
         raise HTTPException(status_code=404, detail="地图版本不存在")
@@ -907,6 +1073,26 @@ def pgm_response(path: Path) -> Response:
 @app.get("/api/versions/{version_id}/map.png")
 def version_map_preview(version_id: str) -> Response:
     return pgm_response(version_dir(version_id) / "map.pgm")
+
+
+@app.get("/api/sessions/{session_id}/cloud.ply")
+def session_cloud_preview(session_id: str) -> FileResponse:
+    path = session_dir(session_id)
+    raw = path / "raw.pcd"
+    preview = path / "preview.ply"
+    if not raw.exists():
+        raise HTTPException(status_code=404, detail="原始 PCD 不存在")
+
+    with session_preview_lock:
+        if not preview.exists() or preview.stat().st_mtime < raw.stat().st_mtime:
+            preview.unlink(missing_ok=True)
+            try:
+                generate_cloud_preview(raw, preview, leaf=0.20, track_job=False)
+            except Exception as exc:
+                preview.unlink(missing_ok=True)
+                raise HTTPException(status_code=500, detail=f"原始 PCD 预览生成失败：{exc}") from exc
+
+    return FileResponse(preview, media_type="application/octet-stream", filename=f"{session_id}.ply")
 
 
 @app.get("/api/versions/{version_id}/cloud.ply")

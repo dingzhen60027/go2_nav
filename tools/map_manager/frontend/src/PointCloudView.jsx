@@ -4,34 +4,75 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { PLYLoader } from 'three/examples/jsm/loaders/PLYLoader.js'
 import { Box, LoaderCircle, RotateCcw } from 'lucide-react'
 
+const HEIGHT_COLORS = [
+  '#243b93',
+  '#1769c2',
+  '#18a9df',
+  '#35cfad',
+  '#8bd646',
+  '#e7d43b',
+  '#f49a2f',
+  '#e94b35',
+  '#a91532',
+].map((value) => new THREE.Color(value))
+
+function percentile(sortedValues, ratio) {
+  const index = (sortedValues.length - 1) * ratio
+  const lower = Math.floor(index)
+  const upper = Math.ceil(index)
+  if (lower === upper) return sortedValues[lower]
+  return sortedValues[lower] + (sortedValues[upper] - sortedValues[lower]) * (index - lower)
+}
+
 function colorizeByHeight(geometry) {
   const position = geometry.getAttribute('position')
-  if (!position?.count) return
+  if (!position?.count) return null
 
-  let min = Infinity
-  let max = -Infinity
+  const heights = new Float32Array(position.count)
   for (let index = 0; index < position.count; index += 1) {
-    const z = position.getZ(index)
-    min = Math.min(min, z)
-    max = Math.max(max, z)
+    heights[index] = position.getZ(index)
   }
+  heights.sort()
 
-  const range = Math.max(max - min, 0.001)
-  const low = new THREE.Color('#45c7d8')
-  const middle = new THREE.Color('#dce8ff')
-  const high = new THREE.Color('#f6b84b')
+  const actualMin = heights[0]
+  const actualMax = heights[heights.length - 1]
+  const low = percentile(heights, 0.02)
+  const high = percentile(heights, 0.98)
+  const range = high - low
   const colors = new Float32Array(position.count * 3)
+  const sampledColor = new THREE.Color()
 
   for (let index = 0; index < position.count; index += 1) {
-    const ratio = (position.getZ(index) - min) / range
-    const color = ratio < 0.55
-      ? low.clone().lerp(middle, ratio / 0.55)
-      : middle.clone().lerp(high, (ratio - 0.55) / 0.45)
-    colors[index * 3] = color.r
-    colors[index * 3 + 1] = color.g
-    colors[index * 3 + 2] = color.b
+    const ratio = range > 1e-6
+      ? THREE.MathUtils.clamp((position.getZ(index) - low) / range, 0, 1)
+      : 0.5
+    const scaled = ratio * (HEIGHT_COLORS.length - 1)
+    const lower = Math.min(Math.floor(scaled), HEIGHT_COLORS.length - 2)
+    sampledColor.lerpColors(HEIGHT_COLORS[lower], HEIGHT_COLORS[lower + 1], scaled - lower)
+    colors[index * 3] = sampledColor.r
+    colors[index * 3 + 1] = sampledColor.g
+    colors[index * 3 + 2] = sampledColor.b
   }
   geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3))
+  return { low, high, actualMin, actualMax }
+}
+
+function createPointTexture() {
+  const canvas = document.createElement('canvas')
+  canvas.width = 32
+  canvas.height = 32
+  const context = canvas.getContext('2d')
+  context.fillStyle = '#ffffff'
+  context.beginPath()
+  context.arc(16, 16, 14, 0, Math.PI * 2)
+  context.fill()
+  const texture = new THREE.CanvasTexture(canvas)
+  texture.colorSpace = THREE.SRGBColorSpace
+  return texture
+}
+
+function formatHeight(value) {
+  return Number.isFinite(value) ? value.toFixed(2) : '--'
 }
 
 export default function PointCloudView({ url }) {
@@ -39,20 +80,26 @@ export default function PointCloudView({ url }) {
   const fitRef = useRef(() => {})
   const [state, setState] = useState('loading')
   const [pointCount, setPointCount] = useState(0)
+  const [heightRange, setHeightRange] = useState(null)
 
   useEffect(() => {
     const host = hostRef.current
     if (!host || !url) return undefined
 
     setState('loading')
+    setPointCount(0)
+    setHeightRange(null)
     const scene = new THREE.Scene()
-    scene.background = new THREE.Color('#101622')
-    scene.fog = new THREE.FogExp2('#101622', 0.012)
+    scene.background = new THREE.Color('#0d141f')
 
     const camera = new THREE.PerspectiveCamera(42, 1, 0.01, 5000)
     camera.up.set(0, 0, 1)
 
-    const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' })
+    const renderer = new THREE.WebGLRenderer({
+      antialias: true,
+      powerPreference: 'high-performance',
+      preserveDrawingBuffer: true,
+    })
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
     renderer.outputColorSpace = THREE.SRGBColorSpace
     host.appendChild(renderer.domElement)
@@ -62,13 +109,11 @@ export default function PointCloudView({ url }) {
     controls.dampingFactor = 0.08
     controls.screenSpacePanning = true
 
-    const grid = new THREE.GridHelper(120, 120, '#3b4a66', '#222c3e')
-    grid.rotation.x = Math.PI / 2
-    grid.position.z = -0.02
-    scene.add(grid)
-
     let cloud = null
+    let grid = null
     let animationFrame = 0
+    let disposed = false
+    const pointTexture = createPointTexture()
 
     const fit = () => {
       if (!cloud) return
@@ -88,25 +133,52 @@ export default function PointCloudView({ url }) {
     loader.load(
       url,
       (geometry) => {
+        if (disposed) {
+          geometry.dispose()
+          return
+        }
         geometry.computeBoundingBox()
         geometry.computeBoundingSphere()
-        colorizeByHeight(geometry)
+        const range = colorizeByHeight(geometry)
         const radius = Math.max(geometry.boundingSphere?.radius || 10, 1)
+        const bounds = geometry.boundingBox
+        const boundsSize = bounds.getSize(new THREE.Vector3())
+        const boundsCenter = bounds.getCenter(new THREE.Vector3())
+        const gridSize = Math.max(Math.ceil(Math.max(boundsSize.x, boundsSize.y) / 10) * 10, 10)
+        const gridDivisions = THREE.MathUtils.clamp(Math.round(gridSize / 2), 10, 80)
+        grid = new THREE.GridHelper(gridSize, gridDivisions, '#54647c', '#273246')
+        grid.rotation.x = Math.PI / 2
+        grid.position.set(
+          boundsCenter.x,
+          boundsCenter.y,
+          bounds.min.z - Math.max(boundsSize.z * 0.01, 0.02),
+        )
+        grid.material.transparent = true
+        grid.material.opacity = 0.56
+        scene.add(grid)
+        scene.fog = new THREE.Fog('#0d141f', radius * 2.2, radius * 8)
+
         const material = new THREE.PointsMaterial({
-          size: Math.max(radius / 700, 0.018),
+          size: THREE.MathUtils.clamp(radius / 280, 0.035, 0.28),
           sizeAttenuation: true,
           vertexColors: true,
+          map: pointTexture,
+          alphaTest: 0.35,
           transparent: true,
-          opacity: 0.92,
+          opacity: 0.96,
+          depthWrite: false,
         })
         cloud = new THREE.Points(geometry, material)
         scene.add(cloud)
         setPointCount(geometry.getAttribute('position')?.count || 0)
+        setHeightRange(range)
         setState('ready')
         fit()
       },
       undefined,
-      () => setState('error'),
+      () => {
+        if (!disposed) setState('error')
+      },
     )
 
     const resize = () => {
@@ -128,6 +200,7 @@ export default function PointCloudView({ url }) {
     animate()
 
     return () => {
+      disposed = true
       cancelAnimationFrame(animationFrame)
       observer.disconnect()
       controls.dispose()
@@ -135,6 +208,11 @@ export default function PointCloudView({ url }) {
         cloud.geometry.dispose()
         cloud.material.dispose()
       }
+      if (grid) {
+        grid.geometry.dispose()
+        grid.material.dispose()
+      }
+      pointTexture.dispose()
       renderer.dispose()
       renderer.domElement.remove()
     }
@@ -159,7 +237,22 @@ export default function PointCloudView({ url }) {
         <div className="canvas-overlay error">点云预览加载失败</div>
       )}
       {state === 'ready' && (
-        <div className="canvas-meta">{pointCount.toLocaleString()} points</div>
+        <>
+          <div className="canvas-meta"><strong>{pointCount.toLocaleString()}</strong><span>points</span></div>
+          {heightRange && (
+            <div className="height-legend" aria-label="点云 Z 高度色带">
+              <div className="height-legend-head"><strong>Z 高度</strong><span>m</span></div>
+              <div className="height-legend-body">
+                <div className="height-gradient" />
+                <div className="height-labels">
+                  <span>{formatHeight(heightRange.high)}</span>
+                  <span>{formatHeight((heightRange.high + heightRange.low) / 2)}</span>
+                  <span>{formatHeight(heightRange.low)}</span>
+                </div>
+              </div>
+            </div>
+          )}
+        </>
       )}
       <button className="canvas-action" onClick={() => fitRef.current()} title="复位 3D 视角" aria-label="复位 3D 视角">
         <RotateCcw size={17} />
