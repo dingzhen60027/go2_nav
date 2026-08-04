@@ -51,10 +51,27 @@ try {
       primaryControlHeight: Math.round(document.querySelector('.pipeline-stage > button').getBoundingClientRect().height),
       mappingAlgorithm: document.querySelector('[aria-label="建图算法"]')?.value,
       mappingAlgorithms: [...document.querySelectorAll('[aria-label="建图算法"] option')].map((option) => option.value),
+      localizationModule: document.querySelector('[aria-label="定位模块"]')?.value,
+      localizationModules: [...document.querySelectorAll('[aria-label="定位模块"] option')].map((option) => option.value),
       explicitActivation: Boolean(activationButton),
       activationInViewport: Boolean(activationRect && activationRect.top >= 0 && activationRect.bottom <= innerHeight),
     }
   })
+
+  let localizationStartPayload = null
+  await desktop.route('**/api/runtime/start', async (route) => {
+    localizationStartPayload = route.request().postDataJSON()
+    await route.fulfill({
+      status: 202,
+      contentType: 'application/json',
+      body: JSON.stringify({ status: 'running', mode: 'localization', algorithm: localizationStartPayload.algorithm }),
+    })
+  })
+  await desktop.locator('[aria-label="定位模块"]').selectOption('pure_icp')
+  await desktop.getByRole('button', { name: '纯 ICP', exact: true }).click()
+  await desktop.waitForTimeout(200)
+  results.desktop.localizationStartPayload = localizationStartPayload
+  await desktop.unroute('**/api/runtime/start')
 
   await desktop.locator('.section-tabs button').filter({ hasText: '回收站' }).click()
   await desktop.locator('.trash-list').waitFor()
@@ -126,6 +143,10 @@ try {
     && results.desktop.primaryControlHeight >= 40
     && results.desktop.mappingAlgorithm === 'faster_lio'
     && results.desktop.mappingAlgorithms.join(',') === 'faster_lio,fastlio2'
+    && results.desktop.localizationModule === 'fused_ekf'
+    && results.desktop.localizationModules.join(',') === 'fused_ekf,pure_icp'
+    && results.desktop.localizationStartPayload?.mode === 'localization'
+    && results.desktop.localizationStartPayload?.algorithm === 'pure_icp'
     && results.desktop.explicitActivation
     && results.desktop.activationInViewport
     && results.desktop.trashVisible

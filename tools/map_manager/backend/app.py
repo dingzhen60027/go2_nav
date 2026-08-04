@@ -70,7 +70,12 @@ class ActivateRequest(BaseModel):
 
 class RuntimeRequest(BaseModel):
     mode: Literal["mapping", "localization", "navigation"]
-    algorithm: Literal["faster_lio", "fastlio2"] | None = None
+    algorithm: Literal[
+        "faster_lio",
+        "fastlio2",
+        "pure_icp",
+        "fused_ekf",
+    ] | None = None
 
 
 class TrashRequest(BaseModel):
@@ -763,6 +768,20 @@ def overview() -> dict[str, Any]:
         "legacy_icp": file_info(LEGACY_ICP_PCD),
         "job": job_snapshot(),
         "runtime": runtime_manager.snapshot(),
+        "runtime_modules": {
+            "localization": [
+                {
+                    "id": "fused_ekf",
+                    "name": "融合定位",
+                    "description": "运动预测 + ICP 地图修正",
+                },
+                {
+                    "id": "pure_icp",
+                    "name": "纯 ICP",
+                    "description": "原有点云直接匹配定位",
+                },
+            ],
+        },
     }
 
 
@@ -778,7 +797,12 @@ def start_runtime(request: RuntimeRequest) -> dict[str, Any]:
     if previous_capture["new_for_run"] and not previous_capture["archived"]:
         raise HTTPException(status_code=409, detail="上一次建图结果尚未保存或丢弃")
 
-    algorithm = (request.algorithm or "faster_lio") if request.mode == "mapping" else None
+    if request.mode == "mapping":
+        algorithm = request.algorithm or "faster_lio"
+    elif request.mode == "localization":
+        algorithm = request.algorithm or "pure_icp"
+    else:
+        algorithm = None
     run_id = make_id("run") if request.mode == "mapping" else None
     capture_path: Path | None = None
     capture_dir: Path | None = None

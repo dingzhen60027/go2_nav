@@ -30,7 +30,9 @@ maps/
 
 - 导出只创建候选版本，不自动改变导航地图。
 - 激活操作原子切换 `maps/active`。
-- `start_localization.sh` 和 `start_navigation.sh` 只读取完整的 active 地图包。
+- 定位模块可选择原有 `start_localization.sh`（纯 ICP）或
+  `start_fused_localization.sh`（运动预测 + ICP 修正）；两者只读取完整的 active 地图包。
+- `start_navigation.sh` 独立管理现有导航流程。
 - Web 启动的建图、定位和导航流程由后端统一监督；停止时按进程组清理，Web 服务退出时也会收尾。
 - 删除版本或会话只会移动到项目内的回收站，恢复后回到原 ID；彻底删除需要二次确认。
 - 旧 `maps/map_*.{pgm,yaml}` 文件保持只读，不自动迁移或删除。

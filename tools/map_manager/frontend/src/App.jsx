@@ -36,8 +36,17 @@ const MAPPING_ALGORITHMS = {
   unknown: '算法未记录',
 }
 
+const LOCALIZATION_MODULES = {
+  fused_ekf: '融合定位',
+  pure_icp: '纯 ICP',
+}
+
 function algorithmLabel(value) {
   return MAPPING_ALGORITHMS[value] || MAPPING_ALGORITHMS.unknown
+}
+
+function localizationModuleLabel(value) {
+  return LOCALIZATION_MODULES[value] || '定位模块'
 }
 
 
@@ -222,6 +231,7 @@ export default function App() {
   const [toast, setToast] = useState(null)
   const [actionBusy, setActionBusy] = useState(false)
   const [mappingAlgorithm, setMappingAlgorithm] = useState(() => window.localStorage.getItem('go2.mappingAlgorithm') || 'faster_lio')
+  const [localizationModule, setLocalizationModule] = useState(() => window.localStorage.getItem('go2.localizationModule') || 'fused_ekf')
   const handledJobRef = useRef(null)
 
   const notify = useCallback((message, type = 'success') => {
@@ -246,6 +256,7 @@ export default function App() {
 
   useEffect(() => { refresh() }, [refresh])
   useEffect(() => { window.localStorage.setItem('go2.mappingAlgorithm', mappingAlgorithm) }, [mappingAlgorithm])
+  useEffect(() => { window.localStorage.setItem('go2.localizationModule', localizationModule) }, [localizationModule])
   useEffect(() => {
     const busy = data?.job?.running || ['running', 'stopping'].includes(data?.runtime?.status)
     const interval = window.setInterval(() => refresh(true), busy ? 1200 : 7000)
@@ -308,9 +319,15 @@ export default function App() {
   const startRuntime = async (mode) => {
     setActionBusy(true)
     try {
-      const payload = mode === 'mapping' ? { mode, algorithm: mappingAlgorithm } : { mode }
+      const payload = mode === 'mapping'
+        ? { mode, algorithm: mappingAlgorithm }
+        : mode === 'localization'
+          ? { mode, algorithm: localizationModule }
+          : { mode }
       await api('/api/runtime/start', { method: 'POST', body: JSON.stringify(payload) })
-      notify(mode === 'mapping' ? `${algorithmLabel(mappingAlgorithm)} 建图已启动` : `${mode === 'localization' ? 'ICP 定位' : '导航'}已使用当前地图启动`)
+      notify(mode === 'mapping'
+        ? `${algorithmLabel(mappingAlgorithm)} 建图已启动`
+        : `${mode === 'localization' ? localizationModuleLabel(localizationModule) : '导航'}已使用当前地图启动`)
       await refresh(true)
     } catch (requestError) {
       notify(requestError.message, 'error')
@@ -440,7 +457,7 @@ export default function App() {
       <section className="runtime-bar">
         <div className={`runtime-state ${data?.runtime?.status || 'idle'}`}>
           <span className="runtime-pulse" />
-          <div><strong>{data?.runtime?.status === 'running' ? `${data.runtime.mode === 'mapping' ? `${algorithmLabel(data.runtime.algorithm)} 正在建图` : { localization: '定位运行中', navigation: '导航运行中' }[data.runtime.mode]}` : data?.runtime?.status === 'stopping' ? '正在停止' : data?.runtime?.status === 'failed' ? '流程异常退出' : '系统待命'}</strong><span>{data?.runtime?.status === 'running' || data?.runtime?.status === 'failed' ? data?.runtime?.logs?.at(-1) || '正在启动' : '当前没有运行 ROS 流程'}</span></div>
+          <div><strong>{data?.runtime?.status === 'running' ? `${data.runtime.mode === 'mapping' ? `${algorithmLabel(data.runtime.algorithm)} 正在建图` : data.runtime.mode === 'localization' ? `${localizationModuleLabel(data.runtime.algorithm)}运行中` : '导航运行中'}` : data?.runtime?.status === 'stopping' ? '正在停止' : data?.runtime?.status === 'failed' ? '流程异常退出' : '系统待命'}</strong><span>{data?.runtime?.status === 'running' || data?.runtime?.status === 'failed' ? data?.runtime?.logs?.at(-1) || '正在启动' : '当前没有运行 ROS 流程'}</span></div>
         </div>
         <div className="core-pipeline" aria-label="地图处理流程">
           <section className={`pipeline-stage ${data?.runtime?.mode === 'mapping' && data?.runtime?.status === 'running' ? 'running' : ''}`}>
@@ -456,10 +473,10 @@ export default function App() {
           </section>
           <ChevronRight className="pipeline-arrow" size={18} />
           <section className={`pipeline-stage run-stage ${['localization', 'navigation'].includes(data?.runtime?.mode) && data?.runtime?.status === 'running' ? 'running' : ''}`}>
-            <div className="pipeline-title"><span>3</span><div><strong>使用地图</strong><small>{data?.active?.name || '先设定定位 / 导航地图'}</small></div></div>
+            <div className="pipeline-title"><span>3</span><div><strong>定位 / 导航</strong><select className="mapping-algorithm-select localization-module-select" aria-label="定位模块" value={data?.runtime?.mode === 'localization' && ['running', 'stopping'].includes(data?.runtime?.status) ? data.runtime.algorithm || localizationModule : localizationModule} onChange={(event) => setLocalizationModule(event.target.value)} disabled={actionBusy || data?.job?.running || ['running', 'stopping'].includes(data?.runtime?.status)}>{(data?.runtime_modules?.localization || [{ id: 'fused_ekf', name: '融合定位' }, { id: 'pure_icp', name: '纯 ICP' }]).map((module) => <option key={module.id} value={module.id}>{module.name}{module.id === 'fused_ekf' ? '（推荐）' : '（原有）'}</option>)}</select></div></div>
             {['localization', 'navigation'].includes(data?.runtime?.mode) && ['running', 'stopping'].includes(data?.runtime?.status)
               ? <button className="stop-map" onClick={stopRuntime} disabled={actionBusy || data.runtime.status === 'stopping'}><Square size={16} />停止并清理</button>
-              : <div className="map-run-actions"><button onClick={() => startRuntime('localization')} disabled={actionBusy || !data?.active?.complete || data?.job?.running || ['running', 'stopping'].includes(data?.runtime?.status)}><MapPin size={16} />ICP 定位</button><button onClick={() => startRuntime('navigation')} disabled={actionBusy || !data?.active?.complete || data?.job?.running || ['running', 'stopping'].includes(data?.runtime?.status)}><Navigation size={16} />导航</button></div>}
+              : <div className="map-run-actions"><button onClick={() => startRuntime('localization')} disabled={actionBusy || !data?.active?.complete || data?.job?.running || ['running', 'stopping'].includes(data?.runtime?.status)}><MapPin size={16} />{localizationModuleLabel(localizationModule)}</button><button onClick={() => startRuntime('navigation')} disabled={actionBusy || !data?.active?.complete || data?.job?.running || ['running', 'stopping'].includes(data?.runtime?.status)}><Navigation size={16} />导航</button></div>}
           </section>
         </div>
       </section>

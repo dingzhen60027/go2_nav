@@ -220,6 +220,28 @@ class ActivationTest(unittest.TestCase):
         self.assertEqual(kwargs["environment"]["GO2_MAPPING_OUTPUT_DIR"], str(kwargs["capture_dir"]))
         self.assertTrue(kwargs["capture_dir"].is_dir())
 
+    def test_fused_localization_module_is_forwarded_to_runtime(self):
+        version = self.create_version("map-20260804-localization")
+        backend.activate(backend.ActivateRequest(version_id=version.name))
+        runtime = {"status": "idle", "mode": None}
+        with (
+            patch.object(backend.runtime_manager, "snapshot", return_value=runtime),
+            patch.object(
+                backend.runtime_manager,
+                "start",
+                return_value={"status": "running"},
+            ) as start,
+        ):
+            result = backend.start_runtime(
+                backend.RuntimeRequest(
+                    mode="localization",
+                    algorithm="fused_ekf",
+                )
+            )
+
+        self.assertEqual(result["status"], "running")
+        self.assertEqual(start.call_args.args[:2], ("localization", "fused_ekf"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -19,8 +19,11 @@ def _now_iso() -> str:
 
 class RuntimeManager:
     MODES = {
-        "localization": "start_localization.sh",
         "navigation": "start_navigation.sh",
+    }
+    LOCALIZATION_ALGORITHMS = {
+        "pure_icp": "start_localization.sh",
+        "fused_ekf": "start_fused_localization.sh",
     }
     MAPPING_ALGORITHMS = {
         "faster_lio": "start_mapping.sh",
@@ -107,6 +110,8 @@ class RuntimeManager:
     def _script_for(self, mode: str, algorithm: str | None = None) -> str | None:
         if mode == "mapping":
             return self.MAPPING_ALGORITHMS.get(algorithm or "faster_lio")
+        if mode == "localization":
+            return self.LOCALIZATION_ALGORITHMS.get(algorithm or "pure_icp")
         return self.MODES.get(mode)
 
     def start(
@@ -120,7 +125,12 @@ class RuntimeManager:
         capture_dir: Path | None = None,
         capture_baseline: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        selected_algorithm = (algorithm or "faster_lio") if mode == "mapping" else None
+        if mode == "mapping":
+            selected_algorithm = algorithm or "faster_lio"
+        elif mode == "localization":
+            selected_algorithm = algorithm or "pure_icp"
+        else:
+            selected_algorithm = None
         script_name = self._script_for(mode, selected_algorithm)
         if not script_name:
             raise ValueError("不支持的运行模式或建图算法")

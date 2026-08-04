@@ -27,6 +27,17 @@ class RuntimeManagerTest(unittest.TestCase):
             "while true; do sleep 1; done\n",
             encoding="ascii",
         )
+        for name, marker in (
+            ("start_localization.sh", "PURE_ICP_READY"),
+            ("start_fused_localization.sh", "FUSED_EKF_READY"),
+        ):
+            (self.root / name).write_text(
+                "#!/bin/bash\n"
+                "trap 'exit 0' INT TERM\n"
+                f"echo {marker}\n"
+                "while true; do sleep 1; done\n",
+                encoding="ascii",
+            )
         self.manager = RuntimeManager(self.root, self.root / "runtime.json")
 
     def tearDown(self):
@@ -80,6 +91,30 @@ class RuntimeManagerTest(unittest.TestCase):
     def test_rejects_unknown_mapping_algorithm(self):
         with self.assertRaises(ValueError):
             self.manager.start("mapping", "unknown")
+
+    def test_localization_modules_use_independent_scripts(self):
+        for module, marker in (
+            ("pure_icp", "PURE_ICP_READY"),
+            ("fused_ekf", "FUSED_EKF_READY"),
+        ):
+            started = self.manager.start("localization", module)
+            self.assertEqual(started["mode"], "localization")
+            self.assertEqual(started["algorithm"], module)
+            for _ in range(30):
+                if any(marker in line for line in self.manager.snapshot()["logs"]):
+                    break
+                time.sleep(0.05)
+            self.assertTrue(any(marker in line for line in self.manager.snapshot()["logs"]))
+            self.manager.stop(timeout=1.0)
+
+    def test_localization_defaults_to_legacy_pure_icp(self):
+        started = self.manager.start("localization")
+        self.assertEqual(started["algorithm"], "pure_icp")
+        self.manager.stop(timeout=1.0)
+
+    def test_rejects_unknown_localization_module(self):
+        with self.assertRaises(ValueError):
+            self.manager.start("localization", "unknown")
 
 
 if __name__ == "__main__":
