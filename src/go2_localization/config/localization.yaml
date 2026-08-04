@@ -1,0 +1,122 @@
+sport_state_adapter:
+  ros__parameters:
+    input_topic: "/sportmodestate"
+    base_frame: "base_link"
+    imu_frame: "imu"
+    velocity_in_body_frame: true
+    max_timestamp_skew_sec: 0.5
+    reject_nonzero_error_code: true
+    velocity_stddev_x: 0.08
+    velocity_stddev_y: 0.12
+    orientation_stddev_roll_pitch: 0.035
+    orientation_stddev_yaw: 0.5
+    angular_velocity_stddev: 0.025
+    stale_timeout_sec: 0.5
+
+icp_fusion_bridge:
+  ros__parameters:
+    map_frame: "map"
+    # base_link -> icp_tracking_frame. The tracking frame is level with the
+    # body but located at the MID360 origin after Fast ICP gravity leveling.
+    tracking_translation: [0.16143, 0.0, 0.12262]
+    tracking_rotation: [0.0, 0.0, 0.0, 1.0]
+    max_translation_xy: 0.60
+    max_translation_z: 0.35
+    max_yaw: 0.55
+    max_rotation: 0.70
+    max_prediction_age_sec: 0.50
+    max_measurement_age_sec: 0.75
+    icp_stale_timeout_sec: 1.0
+    seed_rate_hz: 15.0
+    position_stddev_xy: 0.15
+    position_stddev_z: 0.25
+    orientation_stddev_roll_pitch: 0.12
+    orientation_stddev_yaw: 0.15
+
+ekf_local:
+  ros__parameters:
+    frequency: 50.0
+    sensor_timeout: 0.20
+    two_d_mode: true
+    transform_time_offset: 0.0
+    transform_timeout: 0.05
+    print_diagnostics: true
+    publish_tf: true
+    publish_acceleration: false
+    reset_on_time_jump: true
+    predict_to_current_time: true
+
+    map_frame: map
+    odom_frame: odom
+    base_link_frame: base_link
+    world_frame: odom
+
+    twist0: /localization/body_twist
+    twist0_config: [false, false, false,
+                    false, false, false,
+                    true,  true,  false,
+                    false, false, false,
+                    false, false, false]
+    twist0_queue_size: 10
+    twist0_nodelay: true
+    twist0_rejection_threshold: 4.0
+
+    imu0: /localization/body_imu
+    imu0_config: [false, false, false,
+                  false, false, false,
+                  false, false, false,
+                  false, false, true,
+                  false, false, false]
+    imu0_differential: false
+    imu0_relative: false
+    imu0_queue_size: 50
+    imu0_nodelay: true
+    imu0_pose_rejection_threshold: 4.0
+    imu0_twist_rejection_threshold: 4.0
+    imu0_remove_gravitational_acceleration: false
+
+    use_control: false
+
+ekf_global:
+  ros__parameters:
+    frequency: 30.0
+    sensor_timeout: 0.30
+    two_d_mode: true
+    transform_time_offset: 0.0
+    transform_timeout: 0.05
+    print_diagnostics: true
+    publish_tf: true
+    publish_acceleration: false
+    reset_on_time_jump: true
+    predict_to_current_time: true
+
+    map_frame: map
+    odom_frame: odom
+    base_link_frame: base_link
+    world_frame: map
+
+    odom0: /localization/odometry/local
+    odom0_config: [false, false, false,
+                   false, false, false,
+                   true,  true,  false,
+                   false, false, true,
+                   false, false, false]
+    odom0_differential: false
+    odom0_relative: false
+    odom0_queue_size: 20
+    odom0_nodelay: true
+    odom0_twist_rejection_threshold: 4.0
+
+    pose0: /localization/icp_pose
+    pose0_config: [true,  true,  false,
+                   false, false, true,
+                   false, false, false,
+                   false, false, false,
+                   false, false, false]
+    pose0_differential: false
+    pose0_relative: false
+    pose0_queue_size: 10
+    pose0_nodelay: true
+    pose0_rejection_threshold: 5.0
+
+    use_control: false

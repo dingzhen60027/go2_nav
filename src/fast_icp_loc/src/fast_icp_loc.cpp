@@ -35,6 +35,7 @@ FastIcpLoc::FastIcpLoc(const rclcpp::NodeOptions &options)
   world_frame_   = this->declare_parameter("world_frame", "camera_init");
   body_frame_    = this->declare_parameter("body_frame", "livox_frame");
   lidar_frame_   = this->declare_parameter("lidar_frame", "livox_frame");
+  prediction_topic_ = this->declare_parameter("prediction_topic", "");
   voxel_leaf_    = this->declare_parameter("voxel_leaf", 0.15);
   max_corr_dist_ = this->declare_parameter("max_corr_dist", 2.0);
   max_translation_delta_ = this->declare_parameter("max_translation_delta", 0.45);
@@ -45,6 +46,9 @@ FastIcpLoc::FastIcpLoc(const rclcpp::NodeOptions &options)
   max_scan_duration_sec_ = this->declare_parameter("max_scan_duration_sec", 0.15);
   imu_buffer_duration_sec_ = this->declare_parameter("imu_buffer_duration_sec", 2.0);
   imu_init_max_gyro_ = this->declare_parameter("imu_init_max_gyro", 0.10);
+  prediction_timeout_sec_ = this->declare_parameter("prediction_timeout_sec", 0.25);
+  publish_only_accepted_pose_ =
+      this->declare_parameter("publish_only_accepted_pose", false);
   max_pending_scans_ = this->declare_parameter("max_pending_scans", 3);
   max_iter_      = this->declare_parameter("max_iterations", 30);
 
@@ -67,6 +71,10 @@ FastIcpLoc::FastIcpLoc(const rclcpp::NodeOptions &options)
   if (max_pending_scans_ < 1) {
     RCLCPP_WARN(get_logger(), "max_pending_scans must be at least 1; using 3");
     max_pending_scans_ = 3;
+  }
+  if (prediction_timeout_sec_ <= 0.0) {
+    RCLCPP_WARN(get_logger(), "prediction_timeout_sec must be positive; using 0.25 s");
+    prediction_timeout_sec_ = 0.25;
   }
 
   const auto rotation_values = this->declare_parameter<std::vector<double>>(
@@ -116,6 +124,14 @@ FastIcpLoc::FastIcpLoc(const rclcpp::NodeOptions &options)
   init_pose_sub_ = this->create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
       "/initialpose", 10,
       std::bind(&FastIcpLoc::initPoseCallback, this, std::placeholders::_1));
+
+  if (!prediction_topic_.empty()) {
+    prediction_pose_sub_ =
+        this->create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
+            prediction_topic_, 10,
+            std::bind(&FastIcpLoc::predictionPoseCallback, this,
+                      std::placeholders::_1));
+  }
 
   pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>(
       "/icp_pose", 10);
@@ -271,8 +287,37 @@ void FastIcpLoc::initPoseCallback(geometry_msgs::msg::PoseWithCovarianceStamped:
   last_pose_(0,3) = p.x;
   last_pose_(1,3) = p.y;
   last_pose_(2,3) = p.z;
+  prediction_received_ns_ = 0;
   localized_ = true;
   RCLCPP_INFO(get_logger(), "Initial pose: (%.2f, %.2f, %.2f), start tracking", p.x, p.y, p.z);
+}
+
+void FastIcpLoc::predictionPoseCallback(
+    geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg) {
+  if (!localized_ || (!msg->header.frame_id.empty() &&
+                      msg->header.frame_id != world_frame_)) {
+    return;
+  }
+
+  const auto &p = msg->pose.pose.position;
+  const auto &o = msg->pose.pose.orientation;
+  if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z) ||
+      !std::isfinite(o.x) || !std::isfinite(o.y) || !std::isfinite(o.z) ||
+      !std::isfinite(o.w)) {
+    return;
+  }
+
+  Eigen::Quaterniond q(o.w, o.x, o.y, o.z);
+  if (q.norm() < 1e-9) {
+    return;
+  }
+  q.normalize();
+  prediction_pose_.setIdentity();
+  prediction_pose_.block<3, 3>(0, 0) = q.toRotationMatrix();
+  prediction_pose_(0, 3) = p.x;
+  prediction_pose_(1, 3) = p.y;
+  prediction_pose_(2, 3) = p.z;
+  prediction_received_ns_ = this->now().nanoseconds();
 }
 
 void FastIcpLoc::scanCallback(livox_ros_driver2::msg::CustomMsg::SharedPtr msg) {
@@ -445,16 +490,25 @@ void FastIcpLoc::processScan(
   icp.setMaximumIterations(max_iter_);
   icp.setNumThreads(4);
 
-  auto aligned = pcl::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
-  icp.align(*aligned, last_pose_.cast<float>());
+  Eigen::Matrix4d initial_guess = last_pose_;
+  const int64_t prediction_age_ns =
+      this->now().nanoseconds() - prediction_received_ns_;
+  if (prediction_received_ns_ > 0 && prediction_age_ns >= 0 &&
+      prediction_age_ns <= static_cast<int64_t>(prediction_timeout_sec_ * 1e9)) {
+    initial_guess = prediction_pose_;
+  }
 
+  auto aligned = pcl::make_shared<pcl::PointCloud<pcl::PointXYZ>>();
+  icp.align(*aligned, initial_guess.cast<float>());
+
+  bool accepted = false;
   if (icp.hasConverged()) {
     const Eigen::Matrix4d candidate = icp.getFinalTransformation().cast<double>();
     const Eigen::Vector3d delta_t =
-        candidate.block<3, 1>(0, 3) - last_pose_.block<3, 1>(0, 3);
+        candidate.block<3, 1>(0, 3) - initial_guess.block<3, 1>(0, 3);
     const double translation_delta = delta_t.head<2>().norm();
     const double yaw_delta =
-        std::abs(normalizeAngle(yawFromPose(candidate) - yawFromPose(last_pose_)));
+        std::abs(normalizeAngle(yawFromPose(candidate) - yawFromPose(initial_guess)));
     const double fitness_score = icp.getFitnessScore(max_corr_dist_);
 
     if (translation_delta > max_translation_delta_ ||
@@ -468,13 +522,16 @@ void FastIcpLoc::processScan(
           max_translation_delta_, max_yaw_delta_, max_fitness_score_);
     } else {
       last_pose_ = candidate;
+      accepted = true;
     }
   } else {
     RCLCPP_WARN_THROTTLE(get_logger(), *this->get_clock(), 2000,
                          "ICP not converged, keeping last pose");
   }
 
-  publishPose(last_pose_, scan_stamp);
+  if (accepted || !publish_only_accepted_pose_) {
+    publishPose(last_pose_, scan_stamp);
+  }
 }
 
 void FastIcpLoc::pruneImuBuffer() {

@@ -29,6 +29,8 @@ private:
   void loadMap();
   void scanCallback(livox_ros_driver2::msg::CustomMsg::SharedPtr msg);
   void initPoseCallback(geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg);
+  void predictionPoseCallback(
+      geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg);
   void imuCallback(sensor_msgs::msg::Imu::SharedPtr msg);
   void processPendingScans();
   void processScan(const livox_ros_driver2::msg::CustomMsg::SharedPtr &msg,
@@ -45,6 +47,7 @@ private:
   std::string world_frame_;
   std::string body_frame_;
   std::string lidar_frame_;
+  std::string prediction_topic_;
   double voxel_leaf_;
   double max_corr_dist_;
   double max_translation_delta_;
@@ -55,6 +58,8 @@ private:
   double max_scan_duration_sec_;
   double imu_buffer_duration_sec_;
   double imu_init_max_gyro_;
+  double prediction_timeout_sec_;
+  bool publish_only_accepted_pose_;
   int max_pending_scans_;
   int max_iter_;
 
@@ -63,6 +68,7 @@ private:
 
   // ---- state ----
   Eigen::Matrix4d last_pose_;
+  Eigen::Matrix4d prediction_pose_{Eigen::Matrix4d::Identity()};
   Eigen::Matrix4d R_level_;        // 实时点云校平旋转矩阵
   bool map_loaded_;
   bool localized_;
@@ -78,10 +84,13 @@ private:
   int64_t last_scan_stamp_ns_{0};
   uint64_t deskewed_scan_count_{0};
   uint64_t dropped_scan_count_{0};
+  int64_t prediction_received_ns_{0};
 
   // ---- pubs/subs ----
   rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr scan_sub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr init_pose_sub_;
+  rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr
+      prediction_pose_sub_;
   rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr pose_pub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr map_cloud_pub_;

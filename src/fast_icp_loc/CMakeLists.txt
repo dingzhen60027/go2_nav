@@ -49,6 +49,8 @@ install(TARGETS ${PROJECT_NAME} fast_icp_loc_node
 )
 install(DIRECTORY launch config rviz
   DESTINATION share/${PROJECT_NAME}
+  PATTERN "__pycache__" EXCLUDE
+  PATTERN "*.pyc" EXCLUDE
 )
 
 if(BUILD_TESTING)
