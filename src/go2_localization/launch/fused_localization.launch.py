@@ -2,21 +2,19 @@ from pathlib import Path
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, GroupAction, IncludeLaunchDescription
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import EnvironmentVariable, LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 
 
 def generate_launch_description():
     package_share = Path(get_package_share_directory("go2_localization"))
-    icp_share = Path(get_package_share_directory("fast_icp_loc"))
     description_share = Path(get_package_share_directory("go2_description"))
     livox_share = Path(get_package_share_directory("livox_ros_driver2"))
 
     localization_config = str(package_share / "config" / "localization.yaml")
-    icp_config = str(icp_share / "config" / "fast_icp_loc.yaml")
     rviz_config = str(package_share / "rviz" / "fused_localization.rviz")
 
     map_pcd = LaunchConfiguration("map_pcd")
@@ -30,8 +28,18 @@ def generate_launch_description():
         [
             DeclareLaunchArgument(
                 "map_pcd",
-                default_value="/home/wjg/go2_nav/maps/active/localization.pcd",
-                description="PCD map used by Fast ICP.",
+                default_value=PathJoinSubstitution(
+                    [
+                        EnvironmentVariable(
+                            "GO2_NAV_ROOT",
+                            default_value=str(Path.home() / "go2_nav"),
+                        ),
+                        "maps",
+                        "active",
+                        "localization.pcd",
+                    ]
+                ),
+                description="PCD map used by the independent fused ICP matcher.",
             ),
             DeclareLaunchArgument(
                 "sport_state_topic",
@@ -42,14 +50,23 @@ def generate_launch_description():
             DeclareLaunchArgument("start_livox", default_value="true"),
             DeclareLaunchArgument("start_icp", default_value="true"),
             DeclareLaunchArgument("use_rviz", default_value="true"),
-            IncludeLaunchDescription(
-                PythonLaunchDescriptionSource(
-                    str(description_share / "launch" / "display.launch.py")
-                ),
-                launch_arguments={
-                    "use_rviz": "false",
-                    "publish_neutral_joints": "false",
-                }.items(),
+            GroupAction(
+                actions=[
+                    IncludeLaunchDescription(
+                        PythonLaunchDescriptionSource(
+                            str(description_share / "launch" / "display.launch.py")
+                        ),
+                        launch_arguments={
+                            "use_rviz": "false",
+                            # The Go2 ROS2 stack does not provide joint_states
+                            # on its own. Publish a neutral pose so the leg
+                            # revolute links receive TF and RobotModel renders
+                            # the complete body before any joint driver exists.
+                            "publish_neutral_joints": "true",
+                        }.items(),
+                    ),
+                ],
+                scoped=True,
                 condition=IfCondition(start_description),
             ),
             IncludeLaunchDescription(
@@ -98,27 +115,24 @@ def generate_launch_description():
                 ],
             ),
             Node(
-                package="fast_icp_loc",
-                executable="fast_icp_loc_node",
-                name="fast_icp_fused",
+                package="go2_localization",
+                executable="fused_icp_matcher",
+                name="fused_icp_matcher",
                 output="screen",
                 parameters=[
-                    icp_config,
+                    localization_config,
                     {
                         "map_pcd": map_pcd,
-                        "body_frame": "icp_tracking_frame",
-                        "lidar_frame": "livox_frame",
-                        "prediction_topic": "/localization/icp_prediction",
-                        "prediction_timeout_sec": 0.25,
-                        "publish_only_accepted_pose": True,
                     },
                 ],
-                remappings=[
-                    ("/tf", "/localization/icp_internal_tf"),
-                    ("/tf_static", "/localization/icp_internal_tf_static"),
-                    ("/icp_pose", "/localization/icp_pose_raw"),
-                    ("/initialpose", "/localization/icp_initialpose"),
-                ],
+                condition=IfCondition(start_icp),
+            ),
+            Node(
+                package="go2_localization",
+                executable="obstacle_cloud_filter",
+                name="obstacle_cloud_filter",
+                output="screen",
+                parameters=[localization_config],
                 condition=IfCondition(start_icp),
             ),
             Node(

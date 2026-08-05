@@ -6,8 +6,9 @@
 
 set -e
 
-PCD_DIR="/home/wjg/go2_nav/src/faster-lio/PCD"
-OUT_DIR="/home/wjg/go2_nav/maps"
+export GO2_NAV_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PCD_DIR="${GO2_NAV_ROOT}/src/faster-lio/PCD"
+OUT_DIR="${GO2_NAV_ROOT}/maps"
 PCD_FILE="${1:-${PCD_DIR}/scans.pcd}"
 
 if [ ! -f "$PCD_FILE" ]; then
@@ -22,7 +23,7 @@ pkill -9 -f "pcd2pgm_node" 2>/dev/null || true
 pkill -9 -f "rviz2" 2>/dev/null || true
 sleep 1
 
-source /home/wjg/go2_nav/install/setup.bash
+source "${GO2_NAV_ROOT}/install/setup.bash"
 
 # 临时中间文件（用完删除）
 TMP_STAT="/tmp/pcd_stat_${TIMESTAMP}.pcd"
@@ -63,7 +64,7 @@ ros2 run pcd2pgm pcd2pgm_node --ros-args \
   -p map_topic_name:=map &
 PID=$!
 
-rviz2 -d "/home/wjg/go2_nav/src/pcd2pgm/rviz/pcd2pgm.rviz" 2>/dev/null &
+rviz2 -d "${GO2_NAV_ROOT}/src/pcd2pgm/rviz/pcd2pgm.rviz" 2>/dev/null &
 
 sleep 6
 

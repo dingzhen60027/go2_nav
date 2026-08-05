@@ -5,6 +5,20 @@ Stephen Brawner (brawner@gmail.com)
      For more information, please see http://wiki.ros.org/sw_urdf_exporter -->
 <robot
   name="go2_description">
+  <!--
+    The planar localization frame is the ground projection of the robot.
+    Go2's body frame is approximately 0.32 m above the floor in the neutral
+    joint pose (the foot center is about 0.296 m below the body origin and
+    the foot radius is about 0.022 m).  Keeping this fixed transform here
+    makes the visual model and the EKF/Nav2 planar frame agree without
+    changing the Livox/ICP extrinsics under base_link.
+  -->
+  <link name="base_footprint" />
+  <joint name="base_footprint_to_base_link" type="fixed">
+    <origin xyz="0 0 0.32" rpy="0 0 0" />
+    <parent link="base_footprint" />
+    <child link="base_link" />
+  </joint>
   <link name="base_link" />
   <joint name="base_link_to_base" type="fixed">
     <origin xyz="0 0 0" rpy="0 0 0" />

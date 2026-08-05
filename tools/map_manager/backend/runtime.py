@@ -18,12 +18,15 @@ def _now_iso() -> str:
 
 
 class RuntimeManager:
-    MODES = {
-        "navigation": "start_navigation.sh",
-    }
     LOCALIZATION_ALGORITHMS = {
         "pure_icp": "start_localization.sh",
         "fused_ekf": "start_fused_localization.sh",
+    }
+    NAVIGATION_ALGORITHMS = {
+        # Keep the original pure-ICP navigation entry point untouched. Fused
+        # navigation owns a separate Nav2 config and starts its own locator.
+        "pure_icp": "start_navigation.sh",
+        "fused_ekf": "start_fused_navigation.sh",
     }
     MAPPING_ALGORITHMS = {
         "faster_lio": "start_mapping.sh",
@@ -112,7 +115,9 @@ class RuntimeManager:
             return self.MAPPING_ALGORITHMS.get(algorithm or "faster_lio")
         if mode == "localization":
             return self.LOCALIZATION_ALGORITHMS.get(algorithm or "pure_icp")
-        return self.MODES.get(mode)
+        if mode == "navigation":
+            return self.NAVIGATION_ALGORITHMS.get(algorithm or "pure_icp")
+        return None
 
     def start(
         self,
@@ -127,13 +132,13 @@ class RuntimeManager:
     ) -> dict[str, Any]:
         if mode == "mapping":
             selected_algorithm = algorithm or "faster_lio"
-        elif mode == "localization":
+        elif mode in {"localization", "navigation"}:
             selected_algorithm = algorithm or "pure_icp"
         else:
             selected_algorithm = None
         script_name = self._script_for(mode, selected_algorithm)
         if not script_name:
-            raise ValueError("不支持的运行模式或建图算法")
+            raise ValueError("不支持的运行模式或算法")
         script = self.repo_root / script_name
         if not script.is_file():
             raise FileNotFoundError(f"启动脚本不存在: {script_name}")
@@ -229,13 +234,19 @@ class RuntimeManager:
             self.state["status"] = "stopping"
             self._write_state()
 
-        for stop_signal, wait_seconds in (
-            (signal.SIGINT, timeout),
-            (signal.SIGTERM, 4.0),
-            (signal.SIGKILL, 2.0),
+        for stop_signal, wait_seconds, process_group in (
+            # Let the workflow script coordinate graceful child shutdown first.
+            # Sending SIGINT to the whole group can make ros2 launch escalate and
+            # kill a mapping node while it is still writing its PCD.
+            (signal.SIGINT, timeout, False),
+            (signal.SIGTERM, 4.0, True),
+            (signal.SIGKILL, 2.0, True),
         ):
             try:
-                os.killpg(process.pid, stop_signal)
+                if process_group:
+                    os.killpg(process.pid, stop_signal)
+                else:
+                    os.kill(process.pid, stop_signal)
             except ProcessLookupError:
                 break
             if self._wait(process, wait_seconds):

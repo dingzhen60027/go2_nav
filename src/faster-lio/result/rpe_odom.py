@@ -16,8 +16,8 @@ class Args(object):
         self.subcommand = "tum"
         self.t_max_diff = 0.01
         self.t_offset = 0.0
-        self.ref_file = "/media/2T/fast_lio2/utbm/groundtruth/tum/utbm_robocar_dataset_20190418_roundabout_noimage.splev.tum"
-        self.est_file = "/home/idriver/Documents/faster_lio_ws/src/fast_lio2/Log/faster_lio/utbm_robocar_dataset_20190418_roundabout_noimage.traj.log"
+        self.ref_file = ""
+        self.est_file = ""
         self.delta = 100
         self.delta_unit = metrics.Unit.meters
         self.rel_delta_tol = 0.1

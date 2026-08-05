@@ -3,6 +3,8 @@ from math import pi
 import pytest
 
 from go2_localization.math_utils import (
+    FusionGateLimits,
+    FusionInnovationGate,
     Pose3,
     base_pose_to_tracking,
     normalize_quaternion,
@@ -10,6 +12,7 @@ from go2_localization.math_utils import (
     pose_innovation,
     tracking_pose_to_base,
 )
+from go2_localization.motion_utils import StationaryGyroCorrector
 
 
 def assert_pose_close(actual, expected):
@@ -60,3 +63,83 @@ def test_gate_rejects_large_yaw_innovation():
 def test_invalid_quaternion_is_rejected():
     with pytest.raises(ValueError):
         normalize_quaternion((0.0, 0.0, 0.0, 0.0))
+
+
+def make_fusion_gate():
+    return FusionInnovationGate(
+        FusionGateLimits(0.6, 0.35, 0.55, 0.7),
+        FusionGateLimits(3.0, 1.0, 1.75, 1.8),
+    )
+
+
+def test_fusion_gate_allows_one_initial_alignment_then_becomes_strict():
+    gate = make_fusion_gate()
+    large_innovation = pose_innovation(
+        Pose3((1.5, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0)),
+        Pose3((0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0)),
+    )
+
+    first = gate.evaluate(large_innovation)
+    second = gate.evaluate(large_innovation)
+
+    assert first.accepted
+    assert first.just_locked
+    assert not second.accepted
+    assert not second.just_locked
+    assert gate.alignment_locked
+
+
+def test_fusion_gate_never_falls_back_without_explicit_reset():
+    gate = make_fusion_gate()
+    small_innovation = pose_innovation(
+        Pose3((0.1, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0)),
+        Pose3((0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0)),
+    )
+    large_innovation = pose_innovation(
+        Pose3((1.5, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0)),
+        Pose3((0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0)),
+    )
+    assert gate.evaluate(small_innovation).just_locked
+    for _ in range(10):
+        assert not gate.evaluate(large_innovation).accepted
+    assert gate.alignment_locked
+
+    gate.reset()
+    assert gate.evaluate(large_innovation).just_locked
+
+
+def test_stationary_gyro_bias_is_removed_after_initialization():
+    corrector = StationaryGyroCorrector(
+        required_samples=3,
+        initialization_max_gyro=0.03,
+        stationary_linear_speed=0.02,
+        stationary_gyro_deadband=0.015,
+    )
+
+    for _ in range(3):
+        velocity, gyro, stationary = corrector.correct(
+            (0.0, 0.0, 0.0), (0.001, -0.002, 0.008)
+        )
+
+    assert corrector.ready
+    assert corrector.bias == pytest.approx((0.001, -0.002, 0.008))
+    assert velocity == (0.0, 0.0, 0.0)
+    assert gyro == pytest.approx((0.0, 0.0, 0.0))
+    assert stationary
+
+
+def test_real_in_place_rotation_is_not_suppressed():
+    corrector = StationaryGyroCorrector(
+        required_samples=1,
+        initialization_max_gyro=0.03,
+        stationary_linear_speed=0.02,
+        stationary_gyro_deadband=0.015,
+    )
+    corrector.correct((0.0, 0.0, 0.0), (0.0, 0.0, 0.005))
+
+    _, gyro, stationary = corrector.correct(
+        (0.0, 0.0, 0.0), (0.0, 0.0, 1.0)
+    )
+
+    assert gyro[2] == pytest.approx(0.995)
+    assert not stationary

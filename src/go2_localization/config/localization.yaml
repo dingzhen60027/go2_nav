@@ -5,28 +5,116 @@ sport_state_adapter:
     imu_frame: "imu"
     velocity_in_body_frame: true
     max_timestamp_skew_sec: 0.5
-    reject_nonzero_error_code: true
+    # Go2 firmware commonly reports error_code=100 while velocity and IMU
+    # fields remain valid. Unitree's motion-state example consumes those
+    # fields without gating on error_code; finite-value validation remains in
+    # the adapter.
+    reject_nonzero_error_code: false
     velocity_stddev_x: 0.08
     velocity_stddev_y: 0.12
     orientation_stddev_roll_pitch: 0.035
     orientation_stddev_yaw: 0.5
     angular_velocity_stddev: 0.025
+    # Calibrate the Go2 gyro while localization starts with the robot still.
+    # Residual yaw rate below the deadband is forced to zero only when planar
+    # speed is also near zero, preventing endless rotation after stopping.
+    gyro_bias_initialization_samples: 100
+    gyro_bias_initialization_max_gyro: 0.03
+    stationary_linear_speed: 0.02
+    stationary_gyro_deadband: 0.015
     stale_timeout_sec: 0.5
+
+fused_icp_matcher:
+  ros__parameters:
+    map_pcd: ""
+    scan_topic: "/livox/lidar"
+    imu_topic: "/livox/imu"
+    world_frame: "map"
+    tracking_frame: "icp_tracking_frame"
+    lidar_frame: "livox_frame"
+    initial_pose_topic: "/localization/fused_icp/initialpose"
+    prediction_topic: "/localization/fused_icp/prediction"
+    output_pose_topic: "/localization/fused_icp/pose_raw"
+    map_cloud_topic: "/map_cloud"
+    raw_scan_topic: "/scan_converted"
+    leveled_scan_topic: "/scan_leveled"
+    deskew_enabled: true
+    max_imu_gap_sec: 0.02
+    max_scan_duration_sec: 0.15
+    # Never match delayed scans after a slow GICP cycle. The node keeps only
+    # the latest scan and IMU ingestion runs in its own callback group.
+    max_scan_age_sec: 0.50
+    imu_buffer_duration_sec: 2.0
+    imu_init_max_gyro: 0.10
+    rotation_lidar_from_imu: [1.0, 0.0, 0.0,
+                              0.0, 1.0, 0.0,
+                              0.0, 0.0, 1.0]
+    voxel_leaf: 0.15
+    max_corr_dist: 1.5
+    max_translation_delta: 0.45
+    max_translation_z_delta: 0.35
+    max_yaw_delta: 0.60
+    # The scan is gravity-levelled, so a large roll/pitch result is a
+    # degenerate 6-DoF GICP solution rather than valid robot motion.
+    max_tilt: 0.35
+    max_rotation_delta: 0.70
+    max_fitness_score: 1.0
+    max_iterations: 15
+    acquisition_max_corr_dist: 3.0
+    acquisition_max_translation_delta: 2.5
+    acquisition_max_translation_z_delta: 1.0
+    acquisition_max_yaw_delta: 1.57
+    acquisition_max_tilt: 0.35
+    acquisition_max_rotation_delta: 1.80
+    acquisition_max_fitness_score: 1.0
+    acquisition_max_iterations: 50
+    acquisition_confirmation_count: 3
+    prediction_timeout_sec: 0.25
+    prediction_buffer_duration_sec: 2.0
+
+obstacle_cloud_filter:
+  ros__parameters:
+    input_topic: "/scan_leveled"
+    output_topic: "/scan_obstacles"
+    ground_filter_enabled: true
+    voxel_leaf: 0.08
+    ground_distance_threshold: 0.06
+    ground_max_tilt_deg: 18.0
+    # Expected ground height in icp_tracking_frame.  Restricting the RANSAC
+    # candidates prevents a dense ceiling from being selected as "ground".
+    ground_z_min: -0.80
+    ground_z_max: -0.15
+    min_ground_inliers: 80
 
 icp_fusion_bridge:
   ros__parameters:
     map_frame: "map"
-    # base_link -> icp_tracking_frame. The tracking frame is level with the
-    # body but located at the MID360 origin after Fast ICP gravity leveling.
+    # base_link -> icp_tracking_frame.  base_link is the physical body frame;
+    # the EKFs use base_footprint as their planar ground-projection frame.
+    # The tracking frame remains level with the body and located at the MID360
+    # origin after fused ICP gravity leveling.
     tracking_translation: [0.16143, 0.0, 0.12262]
     tracking_rotation: [0.0, 0.0, 0.0, 1.0]
     max_translation_xy: 0.60
     max_translation_z: 0.35
     max_yaw: 0.55
     max_rotation: 0.70
+    # The matcher already confirms three stable acquisition scans. This gate
+    # only bounds the one-time handoff that aligns the global EKF.
+    alignment_max_translation_xy: 3.0
+    alignment_max_translation_z: 1.0
+    alignment_max_yaw: 1.75
+    alignment_max_rotation: 1.80
+    ekf_reset_holdoff_sec: 0.50
     max_prediction_age_sec: 0.50
     max_measurement_age_sec: 0.75
     icp_stale_timeout_sec: 1.0
+    # Buffer local odometry so the matcher prediction can be evaluated at the
+    # LiDAR timestamp instead of using a future/current EKF pose during turns.
+    local_odom_frame: "odom"
+    local_odom_history_sec: 3.0
+    max_local_odom_age_sec: 0.50
+    max_local_odom_sync_error_sec: 0.15
     seed_rate_hz: 15.0
     position_stddev_xy: 0.15
     position_stddev_z: 0.25
@@ -48,7 +136,9 @@ ekf_local:
 
     map_frame: map
     odom_frame: odom
-    base_link_frame: base_link
+    # Keep the filter state on the ground projection.  URDF publishes the
+    # fixed base_footprint -> base_link body-height transform.
+    base_link_frame: base_footprint
     world_frame: odom
 
     twist0: /localization/body_twist
@@ -92,7 +182,9 @@ ekf_global:
 
     map_frame: map
     odom_frame: odom
-    base_link_frame: base_link
+    # Keep the filter state on the ground projection.  URDF publishes the
+    # fixed base_footprint -> base_link body-height transform.
+    base_link_frame: base_footprint
     world_frame: map
 
     odom0: /localization/odometry/local

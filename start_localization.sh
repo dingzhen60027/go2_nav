@@ -22,6 +22,7 @@ trap shutdown SIGINT SIGTERM
 trap cleanup EXIT
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+export GO2_NAV_ROOT="$SCRIPT_DIR"
 source "$SCRIPT_DIR/install/setup.bash"
 
 ACTIVE_MAP_DIR="${GO2_MAP_DIR:-$SCRIPT_DIR/maps/active}"

@@ -7,7 +7,7 @@ const browser = await chromium.launch({
   args: ['--no-sandbox', '--disable-dev-shm-usage', '--use-gl=swiftshader'],
 })
 
-const results = { consoleErrors: [], desktop: {}, rawCloud: {}, cloud: {}, mobile: {} }
+const results = { consoleErrors: [], desktop: {}, mapEditor: {}, rawCloud: {}, cloud: {}, waypoint: {}, mobile: {} }
 
 try {
   const desktop = await browser.newPage({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 })
@@ -17,6 +17,7 @@ try {
   desktop.on('pageerror', (error) => results.consoleErrors.push(error.message))
   await desktop.goto(baseUrl, { waitUntil: 'networkidle' })
   await desktop.locator('.app-shell').waitFor()
+  await desktop.locator('.section-tabs button').filter({ hasText: '原始 PCD' }).click()
   await desktop.locator('.session-row').first().waitFor()
   await desktop.locator('.cloud-host[data-cloud-state="ready"]').waitFor({ timeout: 120000 })
   await desktop.waitForTimeout(700)
@@ -53,10 +54,40 @@ try {
       mappingAlgorithms: [...document.querySelectorAll('[aria-label="建图算法"] option')].map((option) => option.value),
       localizationModule: document.querySelector('[aria-label="定位模块"]')?.value,
       localizationModules: [...document.querySelectorAll('[aria-label="定位模块"] option')].map((option) => option.value),
+      processCleanupButton: Boolean(document.querySelector('[aria-label="清理所有项目进程"]')),
       explicitActivation: Boolean(activationButton),
       activationInViewport: Boolean(activationRect && activationRect.top >= 0 && activationRect.bottom <= innerHeight),
     }
   })
+
+  await desktop.locator('[aria-label="清理所有项目进程"]').click()
+  results.desktop.processCleanupConfirmation = await desktop.getByRole('heading', { name: '强制结束 ROS 运行栈' }).isVisible()
+  await desktop.getByRole('button', { name: '取消', exact: true }).click()
+
+  await desktop.getByRole('button', { name: '修整 2D 地图', exact: true }).click()
+  await desktop.locator('.map-editor canvas.ready').waitFor()
+  await desktop.getByRole('button', { name: /直线补墙/ }).click()
+  const editorCanvas = desktop.locator('.map-editor canvas.ready')
+  const editorBounds = await editorCanvas.boundingBox()
+  await desktop.mouse.move(editorBounds.x + editorBounds.width * 0.35, editorBounds.y + editorBounds.height * 0.45)
+  await desktop.mouse.down()
+  await desktop.mouse.move(editorBounds.x + editorBounds.width * 0.62, editorBounds.y + editorBounds.height * 0.45, { steps: 8 })
+  await desktop.mouse.up()
+  await desktop.screenshot({ path: '/tmp/go2-map-workspace-map-editor.png', fullPage: true })
+  results.mapEditor = await desktop.evaluate(() => ({
+    canvasReady: Boolean(document.querySelector('.map-editor canvas.ready')),
+    sourcePreserved: document.querySelector('.map-editor-safety')?.textContent.includes('源版本保持不变'),
+    operationCount: Number(document.querySelector('.map-editor-summary > div strong')?.textContent),
+    saveEnabled: ![...document.querySelectorAll('.map-editor-save-actions button')]
+      .find((button) => button.textContent.includes('保存为新地图版本'))?.disabled,
+    noHorizontalOverflow: document.querySelector('.map-editor').scrollWidth <= document.querySelector('.map-editor').clientWidth,
+  }))
+  await desktop.getByRole('button', { name: '撤销', exact: true }).click()
+  results.mapEditor.afterUndo = Number(await desktop.locator('.map-editor-summary > div strong').textContent())
+  await desktop.getByRole('button', { name: '重做', exact: true }).click()
+  results.mapEditor.afterRedo = Number(await desktop.locator('.map-editor-summary > div strong').textContent())
+  await desktop.getByRole('button', { name: '恢复到原始2D地图', exact: true }).click()
+  await desktop.getByTitle('关闭编辑器').click()
 
   let localizationStartPayload = null
   await desktop.route('**/api/runtime/start', async (route) => {
@@ -71,6 +102,21 @@ try {
   await desktop.getByRole('button', { name: '纯 ICP', exact: true }).click()
   await desktop.waitForTimeout(200)
   results.desktop.localizationStartPayload = localizationStartPayload
+  await desktop.unroute('**/api/runtime/start')
+
+  let navigationStartPayload = null
+  await desktop.route('**/api/runtime/start', async (route) => {
+    navigationStartPayload = route.request().postDataJSON()
+    await route.fulfill({
+      status: 202,
+      contentType: 'application/json',
+      body: JSON.stringify({ status: 'running', mode: 'navigation', algorithm: navigationStartPayload.algorithm }),
+    })
+  })
+  await desktop.locator('[aria-label="定位模块"]').selectOption('fused_ekf')
+  await desktop.getByRole('button', { name: '导航', exact: true }).click()
+  await desktop.waitForTimeout(200)
+  results.desktop.navigationStartPayload = navigationStartPayload
   await desktop.unroute('**/api/runtime/start')
 
   await desktop.locator('.section-tabs button').filter({ hasText: '回收站' }).click()
@@ -118,6 +164,50 @@ try {
     }
   })
 
+  let cancelRequested = false
+  await desktop.route('**/api/overview', async (route) => {
+    const response = await route.fetch()
+    const body = await response.json()
+    body.runtime = { ...body.runtime, status: 'running', mode: 'navigation', logs: ['Nav2 ready'] }
+    body.waypoints = {
+      map_id: body.active?.id,
+      count: 3,
+      items: [
+        { id: 'wp-20260805-a', name: '装卸区', position: { x: 1.2, y: -0.5, z: 0 }, orientation: { x: 0, y: 0, z: 0, w: 1 }, yaw: 0 },
+        { id: 'wp-20260805-b', name: '巡检通道', position: { x: 4.8, y: 2.1, z: 0 }, orientation: { x: 0, y: 0, z: 0.707, w: 0.707 }, yaw: 1.5708 },
+        { id: 'wp-20260805-c', name: '充电区', position: { x: -1.3, y: 3.5, z: 0 }, orientation: { x: 0, y: 0, z: 1, w: 0 }, yaw: 3.1416 },
+      ],
+    }
+    body.waypoint_mission = {
+      status: 'running', active: true, can_cancel: true, mission_id: 'mission-ui-test',
+      map_id: body.active?.id, total: 3, processed: 1, completed: 1, failed_count: 0,
+      current_index: 1, current_waypoint_id: 'wp-20260805-b', current_waypoint_name: '巡检通道',
+      progress_percent: 54.2, leg_progress_percent: 62.5, distance_remaining: 1.84,
+      elapsed_sec: 73, message: '正在前往 巡检通道', results: [{ waypoint_id: 'wp-20260805-a', succeeded: true }],
+    }
+    await route.fulfill({ response, json: body })
+  })
+  await desktop.route('**/api/waypoint-mission/cancel', async (route) => {
+    cancelRequested = true
+    await route.fulfill({ status: 202, contentType: 'application/json', body: JSON.stringify({ status: 'cancelling' }) })
+  })
+  await desktop.reload({ waitUntil: 'networkidle' })
+  await desktop.locator('.section-tabs button').filter({ hasText: '多点导航' }).click()
+  await desktop.locator('.mission-workspace').waitFor()
+  await desktop.screenshot({ path: '/tmp/go2-map-workspace-waypoints.png', fullPage: true })
+  results.waypoint = await desktop.evaluate(() => ({
+    waypointRows: document.querySelectorAll('.waypoint-row').length,
+    routeStops: document.querySelectorAll('.route-timeline > button').length,
+    progressValue: document.querySelector('.mission-workspace [role="progressbar"]')?.getAttribute('aria-valuenow'),
+    currentGoal: document.querySelector('.route-timeline > button.current strong')?.textContent,
+    persistentDrawer: Boolean(document.querySelector('.mission-drawer')),
+    cancelButton: Boolean([...document.querySelectorAll('.mission-drawer button')].find((button) => button.textContent.includes('取消任务'))),
+    noHorizontalOverflow: document.documentElement.scrollWidth <= innerWidth,
+  }))
+  await desktop.locator('.mission-drawer button').filter({ hasText: '取消任务' }).click()
+  await desktop.waitForTimeout(100)
+  results.waypoint.cancelRequested = cancelRequested
+
   const mobile = await browser.newPage({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 1 })
   mobile.on('pageerror', (error) => results.consoleErrors.push(error.message))
   await mobile.goto(baseUrl, { waitUntil: 'networkidle' })
@@ -145,16 +235,27 @@ try {
     && results.desktop.mappingAlgorithms.join(',') === 'faster_lio,fastlio2'
     && results.desktop.localizationModule === 'fused_ekf'
     && results.desktop.localizationModules.join(',') === 'fused_ekf,pure_icp'
+    && results.desktop.processCleanupButton
+    && results.desktop.processCleanupConfirmation
     && results.desktop.localizationStartPayload?.mode === 'localization'
     && results.desktop.localizationStartPayload?.algorithm === 'pure_icp'
+    && results.desktop.navigationStartPayload?.mode === 'navigation'
+    && results.desktop.navigationStartPayload?.algorithm === 'fused_ekf'
     && results.desktop.explicitActivation
     && results.desktop.activationInViewport
     && results.desktop.trashVisible
+    && results.mapEditor.canvasReady
+    && results.mapEditor.sourcePreserved
+    && results.mapEditor.operationCount === 1
+    && results.mapEditor.saveEnabled
+    && results.mapEditor.afterUndo === 0
+    && results.mapEditor.afterRedo === 1
+    && results.mapEditor.noHorizontalOverflow
     && results.rawCloud.activeSection.includes('原始 PCD')
     && results.rawCloud.selectedSession
     && results.rawCloud.pointLabel
     && results.rawCloud.heightLegend
-    && results.rawCloud.inspectorTitle === '原始 PCD'
+    && ['原始 PCD', '聚类清理副本'].includes(results.rawCloud.inspectorTitle)
     && results.rawCloud.algorithmInSession
     && results.cloud.nonBlankSize
     && results.cloud.heightLegend
@@ -162,6 +263,14 @@ try {
     && results.cloud.renderedPixels > 100
     && results.cloud.coolPixels > 5
     && results.cloud.warmPixels > 5
+    && results.waypoint.waypointRows === 3
+    && results.waypoint.routeStops === 3
+    && results.waypoint.progressValue === '54.2'
+    && results.waypoint.currentGoal === '巡检通道'
+    && results.waypoint.persistentDrawer
+    && results.waypoint.cancelButton
+    && results.waypoint.cancelRequested
+    && results.waypoint.noHorizontalOverflow
     && results.mobile.noHorizontalOverflow
     && results.mobile.sectionsDoNotOverlap
   console.log(JSON.stringify({ ok, ...results }, null, 2))

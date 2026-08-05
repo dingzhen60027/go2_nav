@@ -4,12 +4,24 @@
 set -e
 
 CLEANED=0
+MAPPING_PID=""
 cleanup() {
     [ "$CLEANED" -eq 1 ] && return
     CLEANED=1
     trap - SIGINT SIGTERM EXIT
+    echo "Stopping FASTer-LIO and saving PCD..."
+    if [ -n "$MAPPING_PID" ] && kill -0 "$MAPPING_PID" 2>/dev/null; then
+        kill -INT "$MAPPING_PID" 2>/dev/null || true
+        for _ in $(seq 1 600); do
+            kill -0 "$MAPPING_PID" 2>/dev/null || break
+            sleep 0.1
+        done
+    fi
     jobs -pr | xargs -r kill -INT 2>/dev/null || true
-    sleep 1
+    for _ in $(seq 1 150); do
+        [ -z "$(jobs -pr)" ] && break
+        sleep 0.1
+    done
     jobs -pr | xargs -r kill -TERM 2>/dev/null || true
     sleep 1
     jobs -pr | xargs -r kill -KILL 2>/dev/null || true
@@ -22,11 +34,16 @@ trap shutdown SIGINT SIGTERM
 trap cleanup EXIT
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+export GO2_NAV_ROOT="$SCRIPT_DIR"
 source "$SCRIPT_DIR/install/setup.bash"
+
+PCD_DIR="${GO2_MAPPING_OUTPUT_DIR:-$SCRIPT_DIR/src/faster-lio/PCD}"
+mkdir -p "$PCD_DIR"
 
 echo "=========================================="
 echo "  FASTer-LIO MID360 Mapping"
 echo "  $(date '+%Y-%m-%d %H:%M:%S')"
+echo "  Output: $PCD_DIR"
 echo "=========================================="
 echo ""
 
@@ -57,4 +74,15 @@ echo "  等终端出现 'IMU Initial Done' 再开始走"
 echo ""
 
 ros2 launch faster_lio mapping_mid360.launch.py &
-wait $!
+LAUNCH_PID=$!
+for _ in $(seq 1 100); do
+    MAPPING_PID="$(pgrep -n -f '/faster_lio/run_mapping_online' 2>/dev/null || true)"
+    [ -n "$MAPPING_PID" ] && break
+    kill -0 "$LAUNCH_PID" 2>/dev/null || break
+    sleep 0.1
+done
+if [ -z "$MAPPING_PID" ]; then
+    echo "ERROR: FASTer-LIO mapping node did not start."
+    exit 1
+fi
+wait "$LAUNCH_PID"

@@ -25,6 +25,7 @@ trap shutdown SIGINT SIGTERM
 trap cleanup EXIT
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+export GO2_NAV_ROOT="$SCRIPT_DIR"
 source /opt/ros/humble/setup.bash
 source "$SCRIPT_DIR/install/setup.bash"
 

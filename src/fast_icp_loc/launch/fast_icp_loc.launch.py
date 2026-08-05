@@ -1,14 +1,21 @@
 import os
+from pathlib import Path
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import EnvironmentVariable, LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 
 def generate_launch_description():
     config = os.path.join(get_package_share_directory('fast_icp_loc'),
                           'config', 'fast_icp_loc.yaml')
-    default_map = '/home/wjg/go2_nav/maps/clean/pcd_icp_latest.pcd'
+    default_map = PathJoinSubstitution([
+        EnvironmentVariable(
+            'GO2_NAV_ROOT',
+            default_value=str(Path.home() / 'go2_nav'),
+        ),
+        'maps', 'clean', 'pcd_icp_latest.pcd',
+    ])
 
     map_pcd_arg = DeclareLaunchArgument(
         'map_pcd',

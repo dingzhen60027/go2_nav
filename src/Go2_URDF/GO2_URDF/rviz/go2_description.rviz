@@ -26,7 +26,7 @@ Visualization Manager:
       Offset:
         X: 0
         Y: 0
-        Z: -0.22
+        Z: 0
       Plane: XY
       Plane Cell Count: 20
       Reference Frame: <Fixed Frame>
@@ -73,7 +73,7 @@ Visualization Manager:
   Enabled: true
   Global Options:
     Background Color: 32; 35; 39
-    Fixed Frame: base_link
+    Fixed Frame: base_footprint
     Frame Rate: 30
   Name: root
   Tools:
@@ -94,7 +94,7 @@ Visualization Manager:
       Name: Current View
       Near Clip Distance: 0.01
       Pitch: 0.45
-      Target Frame: base_link
+      Target Frame: base_footprint
       Yaw: 5.4
 Window Geometry:
   Height: 900

@@ -21,6 +21,52 @@ class Innovation:
     rotation: float
 
 
+@dataclass(frozen=True)
+class FusionGateLimits:
+    max_translation_xy: float
+    max_translation_z: float
+    max_yaw: float
+    max_rotation: float
+
+
+@dataclass(frozen=True)
+class FusionGateDecision:
+    accepted: bool
+    just_locked: bool
+
+
+class FusionInnovationGate:
+    def __init__(
+        self,
+        tracking_limits: FusionGateLimits,
+        alignment_limits: FusionGateLimits,
+    ):
+        self.tracking_limits = tracking_limits
+        self.alignment_limits = alignment_limits
+        self.alignment_locked = False
+
+    def reset(self):
+        self.alignment_locked = False
+
+    def evaluate(self, innovation: Innovation) -> FusionGateDecision:
+        limits = (
+            self.tracking_limits
+            if self.alignment_locked
+            else self.alignment_limits
+        )
+        accepted = passes_gate(
+            innovation,
+            limits.max_translation_xy,
+            limits.max_translation_z,
+            limits.max_yaw,
+            limits.max_rotation,
+        )
+        just_locked = accepted and not self.alignment_locked
+        if just_locked:
+            self.alignment_locked = True
+        return FusionGateDecision(accepted=accepted, just_locked=just_locked)
+
+
 def normalize_angle(angle: float) -> float:
     while angle > pi:
         angle -= 2.0 * pi

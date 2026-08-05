@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+from collections import deque
 from math import isfinite
 
 import rclpy
@@ -9,10 +10,13 @@ from nav_msgs.msg import Odometry
 from rclpy.node import Node
 
 from .math_utils import (
+    FusionGateLimits,
+    FusionInnovationGate,
     Pose3,
     base_pose_to_tracking,
+    compose,
+    inverse,
     normalize_quaternion,
-    passes_gate,
     pose_innovation,
     tracking_pose_to_base,
 )
@@ -28,9 +32,18 @@ class IcpFusionBridge(Node):
         self.declare_parameter("max_translation_z", 0.35)
         self.declare_parameter("max_yaw", 0.55)
         self.declare_parameter("max_rotation", 0.70)
+        self.declare_parameter("alignment_max_translation_xy", 3.0)
+        self.declare_parameter("alignment_max_translation_z", 1.0)
+        self.declare_parameter("alignment_max_yaw", 1.75)
+        self.declare_parameter("alignment_max_rotation", 1.80)
+        self.declare_parameter("ekf_reset_holdoff_sec", 0.50)
         self.declare_parameter("max_prediction_age_sec", 0.50)
         self.declare_parameter("max_measurement_age_sec", 0.75)
         self.declare_parameter("icp_stale_timeout_sec", 1.0)
+        self.declare_parameter("local_odom_frame", "odom")
+        self.declare_parameter("local_odom_history_sec", 3.0)
+        self.declare_parameter("max_local_odom_age_sec", 0.50)
+        self.declare_parameter("max_local_odom_sync_error_sec", 0.15)
         self.declare_parameter("seed_rate_hz", 15.0)
         self.declare_parameter("position_stddev_xy", 0.15)
         self.declare_parameter("position_stddev_z", 0.25)
@@ -54,6 +67,35 @@ class IcpFusionBridge(Node):
         )
         self.max_yaw = float(self.get_parameter("max_yaw").value)
         self.max_rotation = float(self.get_parameter("max_rotation").value)
+        self.alignment_max_translation_xy = float(
+            self.get_parameter("alignment_max_translation_xy").value
+        )
+        self.alignment_max_translation_z = float(
+            self.get_parameter("alignment_max_translation_z").value
+        )
+        self.alignment_max_yaw = float(
+            self.get_parameter("alignment_max_yaw").value
+        )
+        self.alignment_max_rotation = float(
+            self.get_parameter("alignment_max_rotation").value
+        )
+        self.ekf_reset_holdoff = max(
+            0.0, float(self.get_parameter("ekf_reset_holdoff_sec").value)
+        )
+        self.fusion_gate = FusionInnovationGate(
+            FusionGateLimits(
+                self.max_translation_xy,
+                self.max_translation_z,
+                self.max_yaw,
+                self.max_rotation,
+            ),
+            FusionGateLimits(
+                self.alignment_max_translation_xy,
+                self.alignment_max_translation_z,
+                self.alignment_max_yaw,
+                self.alignment_max_rotation,
+            ),
+        )
         self.max_prediction_age = float(
             self.get_parameter("max_prediction_age_sec").value
         )
@@ -62,6 +104,21 @@ class IcpFusionBridge(Node):
         )
         self.icp_stale_timeout = float(
             self.get_parameter("icp_stale_timeout_sec").value
+        )
+        self.local_odom_frame = str(
+            self.get_parameter("local_odom_frame").value
+        )
+        self.local_odom_history = max(
+            1.0, float(self.get_parameter("local_odom_history_sec").value)
+        )
+        self.max_local_odom_age = max(
+            0.05, float(self.get_parameter("max_local_odom_age_sec").value)
+        )
+        self.max_local_odom_sync_error = max(
+            0.01,
+            float(
+                self.get_parameter("max_local_odom_sync_error_sec").value
+            ),
         )
         self.position_stddev_xy = float(
             self.get_parameter("position_stddev_xy").value
@@ -80,10 +137,14 @@ class IcpFusionBridge(Node):
             PoseWithCovarianceStamped, "/localization/icp_pose", 10
         )
         self.icp_seed_pub = self.create_publisher(
-            PoseWithCovarianceStamped, "/localization/icp_initialpose", 10
+            PoseWithCovarianceStamped,
+            "/localization/fused_icp/initialpose",
+            10,
         )
         self.icp_prediction_pub = self.create_publisher(
-            PoseWithCovarianceStamped, "/localization/icp_prediction", 10
+            PoseWithCovarianceStamped,
+            "/localization/fused_icp/prediction",
+            10,
         )
         self.global_set_pose_pub = self.create_publisher(
             PoseWithCovarianceStamped, "/localization/global/set_pose", 10
@@ -93,7 +154,7 @@ class IcpFusionBridge(Node):
         )
         self.raw_subscription = self.create_subscription(
             PoseWithCovarianceStamped,
-            "/localization/icp_pose_raw",
+            "/localization/fused_icp/pose_raw",
             self.on_raw_icp,
             20,
         )
@@ -102,6 +163,12 @@ class IcpFusionBridge(Node):
             "/localization/odometry/global",
             self.on_prediction,
             20,
+        )
+        self.local_odometry_subscription = self.create_subscription(
+            Odometry,
+            "/localization/odometry/local",
+            self.on_local_odometry,
+            50,
         )
         self.initial_pose_subscription = self.create_subscription(
             PoseWithCovarianceStamped,
@@ -114,9 +181,16 @@ class IcpFusionBridge(Node):
         self.reference_pose = None
         self.prediction_pose = None
         self.prediction_time = None
+        self.local_pose = None
+        self.local_pose_time = None
+        self.local_pose_stamp_ns = 0
+        self.local_pose_buffer = deque()
+        self.reference_local_pose = None
         self.last_raw_stamp_ns = 0
         self.initialized_time = None
+        self.initialized_stamp_ns = 0
         self.last_icp_time = None
+        self.alignment_time = None
         self.accepted = 0
         self.rejected = 0
         self.consecutive_rejections = 0
@@ -164,34 +238,139 @@ class IcpFusionBridge(Node):
             self.get_logger().error(f"Invalid initial pose: {error}")
             return
 
-        reset = PoseWithCovarianceStamped()
-        reset.header.stamp = self.get_clock().now().to_msg()
-        reset.header.frame_id = self.map_frame
-        reset.pose = message.pose
-        self.fill_pose(reset.pose.pose, pose)
-        self.global_set_pose_pub.publish(reset)
+        # Treat the operator pose as an ICP acquisition seed only.  Committing
+        # it to the global EKF here would move map->odom before scan matching
+        # has verified the pose.  The EKF reset is deliberately deferred to
+        # the first accepted, fully confirmed ICP alignment in on_raw_icp().
         self.reference_pose = pose
         self.prediction_pose = pose
         now = self.get_clock().now()
         self.prediction_time = now
         self.initialized_time = now
+        self.initialized_stamp_ns = now.nanoseconds
         self.last_icp_time = None
+        self.alignment_time = None
         self.last_raw_stamp_ns = 0
         self.initialized = True
+        self.fusion_gate.reset()
+        self.reference_local_pose = None
         self.consecutive_rejections = 0
         self.publish_initial_pose(pose)
-        self.get_logger().info("Initial pose synchronized to ICP and global EKF")
+        self.get_logger().info(
+            "Initial pose queued as fused ICP acquisition seed; "
+            "global EKF reset deferred until alignment is verified"
+        )
 
     def on_prediction(self, message: Odometry):
-        if message.header.frame_id != self.map_frame:
+        # Before ICP acquisition is verified, the global EKF may still contain
+        # its startup state or the previous localization session.  Do not let
+        # that unverified state replace the operator seed.
+        if (
+            not self.initialized
+            or not self.fusion_gate.alignment_locked
+            or message.header.frame_id != self.map_frame
+        ):
             return
+        now = self.get_clock().now()
+        if self.alignment_time is not None:
+            alignment_age = (
+                now - self.alignment_time
+            ).nanoseconds * 1.0e-9
+            if 0.0 <= alignment_age <= self.ekf_reset_holdoff:
+                return
         try:
             self.prediction_pose = self.pose_from_message(message.pose.pose)
         except ValueError:
             return
-        self.prediction_time = self.get_clock().now()
+        self.prediction_time = now
 
-    def active_prediction(self):
+    @staticmethod
+    def message_stamp_ns(message) -> int:
+        return int(message.header.stamp.sec) * 1_000_000_000 + int(
+            message.header.stamp.nanosec
+        )
+
+    def on_local_odometry(self, message: Odometry):
+        if message.header.frame_id != self.local_odom_frame:
+            return
+        try:
+            pose = self.pose_from_message(message.pose.pose)
+        except ValueError:
+            return
+        stamp_ns = self.message_stamp_ns(message)
+        if stamp_ns <= 0:
+            stamp_ns = self.get_clock().now().nanoseconds
+        if self.local_pose_stamp_ns and stamp_ns <= self.local_pose_stamp_ns:
+            if stamp_ns == self.local_pose_stamp_ns:
+                return
+            self.local_pose_buffer.clear()
+        self.local_pose_stamp_ns = stamp_ns
+        self.local_pose = pose
+        self.local_pose_time = self.get_clock().now()
+        self.local_pose_buffer.append((stamp_ns, pose))
+        keep_after_ns = stamp_ns - int(self.local_odom_history * 1.0e9)
+        while (
+            len(self.local_pose_buffer) > 2
+            and self.local_pose_buffer[1][0] < keep_after_ns
+        ):
+            self.local_pose_buffer.popleft()
+
+    def local_pose_at(self, stamp_ns):
+        if stamp_ns is None:
+            if self.local_pose is None or self.local_pose_time is None:
+                return None
+            age = (
+                self.get_clock().now() - self.local_pose_time
+            ).nanoseconds * 1.0e-9
+            if age < 0.0 or age > self.max_local_odom_age:
+                return None
+            return self.local_pose
+        if not self.local_pose_buffer:
+            return None
+        nearest_stamp, nearest_pose = min(
+            self.local_pose_buffer,
+            key=lambda sample: abs(sample[0] - stamp_ns),
+        )
+        sync_error = abs(nearest_stamp - stamp_ns) * 1.0e-9
+        if sync_error > self.max_local_odom_sync_error:
+            return None
+        return nearest_pose
+
+    def active_prediction(self, target_stamp_ns=None):
+        if not self.fusion_gate.alignment_locked:
+            return self.reference_pose
+        if self.alignment_time is not None:
+            alignment_age = (
+                self.get_clock().now() - self.alignment_time
+            ).nanoseconds * 1.0e-9
+            if 0.0 <= alignment_age <= self.ekf_reset_holdoff:
+                return self.reference_pose
+        # Propagate the last map-anchored ICP pose by the relative local-odom
+        # motion since that correction. This follows arbitrary real turns even
+        # if several ICP frames are missed, without feeding the global EKF's
+        # own drift back into the matcher.
+        target_local_pose = self.local_pose_at(target_stamp_ns)
+        if (
+            self.reference_pose is not None
+            and self.reference_local_pose is not None
+            and target_local_pose is not None
+        ):
+            local_delta = compose(
+                inverse(self.reference_local_pose), target_local_pose
+            )
+            return compose(self.reference_pose, local_delta)
+        # A global EKF without fresh absolute ICP corrections is dead
+        # reckoning. Feeding that increasingly uncertain pose back into ICP
+        # creates a positive feedback loop: the ICP initial guess drifts, the
+        # strict gate rejects the correction, and the guess drifts even more.
+        # Keep the matcher locked in tracking mode, but freeze its seed at the
+        # last accepted ICP pose once the correction stream is stale.
+        if self.last_icp_time is not None:
+            correction_age = (
+                self.get_clock().now() - self.last_icp_time
+            ).nanoseconds * 1.0e-9
+            if correction_age > self.icp_stale_timeout:
+                return self.reference_pose
         if self.prediction_pose is not None and self.prediction_time is not None:
             age = (
                 self.get_clock().now() - self.prediction_time
@@ -232,9 +411,10 @@ class IcpFusionBridge(Node):
     def on_raw_icp(self, message: PoseWithCovarianceStamped):
         if not self.initialized:
             return
-        stamp_ns = int(message.header.stamp.sec) * 1_000_000_000 + int(
-            message.header.stamp.nanosec
-        )
+        stamp_ns = self.message_stamp_ns(message)
+        if stamp_ns < self.initialized_stamp_ns:
+            self.rejected += 1
+            return
         if stamp_ns <= self.last_raw_stamp_ns:
             self.rejected += 1
             return
@@ -252,17 +432,12 @@ class IcpFusionBridge(Node):
             self.consecutive_rejections += 1
             return
         base_pose = tracking_pose_to_base(tracking_pose, self.base_to_tracking)
-        prediction = self.active_prediction()
+        prediction = self.active_prediction(stamp_ns)
         if prediction is None:
             return
         innovation = pose_innovation(base_pose, prediction)
-        if not passes_gate(
-            innovation,
-            self.max_translation_xy,
-            self.max_translation_z,
-            self.max_yaw,
-            self.max_rotation,
-        ):
+        gate_decision = self.fusion_gate.evaluate(innovation)
+        if not gate_decision.accepted:
             self.rejected += 1
             self.consecutive_rejections += 1
             self.get_logger().warning(
@@ -285,8 +460,26 @@ class IcpFusionBridge(Node):
         output.pose.covariance[21] = self.orientation_stddev_rp**2
         output.pose.covariance[28] = self.orientation_stddev_rp**2
         output.pose.covariance[35] = self.orientation_stddev_yaw**2
+        if gate_decision.just_locked:
+            reset = PoseWithCovarianceStamped()
+            reset.header.stamp = self.get_clock().now().to_msg()
+            reset.header.frame_id = self.map_frame
+            self.fill_pose(reset.pose.pose, base_pose)
+            reset.pose.covariance = list(output.pose.covariance)
+            self.global_set_pose_pub.publish(reset)
+            now = self.get_clock().now()
+            self.reference_pose = base_pose
+            self.prediction_pose = base_pose
+            self.prediction_time = now
+            self.alignment_time = now
+            self.get_logger().info(
+                "Fused ICP aligned; global EKF reset and strict fusion gate enabled"
+            )
         self.icp_pose_pub.publish(output)
         self.reference_pose = base_pose
+        local_pose_at_measurement = self.local_pose_at(stamp_ns)
+        if local_pose_at_measurement is not None:
+            self.reference_local_pose = local_pose_at_measurement
         self.last_icp_time = self.get_clock().now()
         self.accepted += 1
         self.consecutive_rejections = 0
@@ -307,6 +500,15 @@ class IcpFusionBridge(Node):
         if not self.initialized:
             status.level = DiagnosticStatus.WARN
             status.message = "waiting for initial pose"
+        elif (
+            not self.fusion_gate.alignment_locked
+            and self.consecutive_rejections >= 5
+        ):
+            status.level = DiagnosticStatus.ERROR
+            status.message = "initial fused ICP alignment rejected"
+        elif not self.fusion_gate.alignment_locked:
+            status.level = DiagnosticStatus.WARN
+            status.message = "waiting for stable fused ICP acquisition"
         elif self.consecutive_rejections >= 5:
             status.level = DiagnosticStatus.ERROR
             status.message = "ICP degraded; reinitialization may be required"
@@ -331,6 +533,10 @@ class IcpFusionBridge(Node):
             KeyValue(
                 key="consecutive_rejections",
                 value=str(self.consecutive_rejections),
+            ),
+            KeyValue(
+                key="alignment_locked",
+                value=str(self.fusion_gate.alignment_locked).lower(),
             ),
             KeyValue(
                 key="last_correction_age_sec",

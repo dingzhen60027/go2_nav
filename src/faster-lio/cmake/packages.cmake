@@ -7,7 +7,7 @@ include_directories(${Glog_INCLUDE_DIRS})
 # for ubuntu 18.04, update gcc/g++ to 9, and download tbb2018 from
 # https://github.com/oneapi-src/oneTBB/releases/download/2018/tbb2018_20170726oss_lin.tgz,
 # extract it into CUSTOM_TBB_DIR 
-# specifiy tbb2018, e.g. CUSTOM_TBB_DIR=/home/idriver/Documents/tbb2018_20170726oss
+# specify tbb2018, e.g. CUSTOM_TBB_DIR=/opt/tbb2018_20170726oss
 if (CUSTOM_TBB_DIR)
     set(TBB2018_INCLUDE_DIR "${CUSTOM_TBB_DIR}/include")
     set(TBB2018_LIBRARY_DIR "${CUSTOM_TBB_DIR}/lib/intel64/gcc4.7")

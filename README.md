@@ -6,7 +6,9 @@ Unitree Go2 四足机器人自主导航系统，基于 ROS2 Humble + Livox MID36
 
 ```
 MID360 → FASTer-LIO (建图) → PCD → pcd2pgm → 2D PGM 地图
-                                   → fast_icp_loc (ICP 定位) → /tf
+                                   ├→ fast_icp_loc（纯 ICP 独立定位）
+                                   └→ go2_localization/fused_icp_matcher
+                                      → 运动预测 + ICP + 双 EKF 融合定位
 Go2 SDK → go2_bridge → /odom + /cmd_vel
 Nav2 → 全局/局部规划器 → go2_bridge → Go2
 ```
@@ -23,6 +25,7 @@ Nav2 → 全局/局部规划器 → go2_bridge → Go2
 |---|---|
 | `faster-lio` | FASTer-LIO 紧耦合 LiDAR-IMU 建图 |
 | `fast_icp_loc` | 基于 ICP 的实时定位，对接 Nav2 |
+| `go2_localization` | 独立融合 ICP、Go2 运动预测与双 EKF 定位 |
 | `go2_bridge` | Go2 SDK 桥接，收发 cmd_vel/odom |
 | `pcd2pgm` | PCD 点云 → 2D 占据栅格地图 |
 | `unitree_api` / `unitree_go` | Unitree Go2 ROS2 消息定义 |

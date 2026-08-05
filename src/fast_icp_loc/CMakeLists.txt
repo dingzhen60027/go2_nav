@@ -63,6 +63,11 @@ if(BUILD_TESTING)
     include
     ${EIGEN3_INCLUDE_DIR}
   )
+
+  ament_add_gtest(test_icp_acceptance_gate
+    test/test_icp_acceptance_gate.cpp
+  )
+  target_include_directories(test_icp_acceptance_gate PRIVATE include)
 endif()
 
 ament_package()

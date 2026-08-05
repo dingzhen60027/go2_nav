@@ -1,4 +1,5 @@
 #pragma once
+#include "fast_icp_loc/icp_acceptance_gate.hpp"
 #include "fast_icp_loc/imu_deskewer.hpp"
 
 #include <rclcpp/rclcpp.hpp>
@@ -53,6 +54,10 @@ private:
   double max_translation_delta_;
   double max_yaw_delta_;
   double max_fitness_score_;
+  double initial_max_corr_dist_;
+  double initial_max_translation_delta_;
+  double initial_max_yaw_delta_;
+  double initial_max_fitness_score_;
   bool deskew_enabled_;
   double max_imu_gap_sec_;
   double max_scan_duration_sec_;
@@ -62,12 +67,15 @@ private:
   bool publish_only_accepted_pose_;
   int max_pending_scans_;
   int max_iter_;
+  int initial_max_iter_;
+  int initial_confirmation_count_;
 
   // ---- map ----
   pcl::PointCloud<pcl::PointXYZ>::Ptr map_cloud_ds_;
 
   // ---- state ----
   Eigen::Matrix4d last_pose_;
+  Eigen::Matrix4d initial_seed_pose_{Eigen::Matrix4d::Identity()};
   Eigen::Matrix4d prediction_pose_{Eigen::Matrix4d::Identity()};
   Eigen::Matrix4d R_level_;        // 实时点云校平旋转矩阵
   bool map_loaded_;
@@ -85,6 +93,7 @@ private:
   uint64_t deskewed_scan_count_{0};
   uint64_t dropped_scan_count_{0};
   int64_t prediction_received_ns_{0};
+  IcpAcceptanceGate acceptance_gate_;
 
   // ---- pubs/subs ----
   rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr scan_sub_;

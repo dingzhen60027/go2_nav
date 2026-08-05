@@ -3,8 +3,9 @@
 
 set -e
 
-PCD_DIR="/home/wjg/go2_nav/src/faster-lio/PCD"
-OUT_DIR="/home/wjg/go2_nav/PCD"
+export GO2_NAV_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PCD_DIR="${GO2_NAV_ROOT}/src/faster-lio/PCD"
+OUT_DIR="${GO2_NAV_ROOT}/PCD"
 PCD_FILE="${PCD_DIR}/scans.pcd"
 
 if [ ! -f "$PCD_FILE" ]; then

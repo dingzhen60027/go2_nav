@@ -3,9 +3,27 @@
 set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+export GO2_NAV_ROOT="$SCRIPT_DIR"
 source /opt/ros/humble/setup.bash
 source "$SCRIPT_DIR/install/setup.bash"
 set -u
+
+# Unitree Go2 publishes its state directly over CycloneDDS.  The web manager
+# may be started from a shell that has not sourced setup_go2.sh, so make the
+# DDS interface explicit for this workflow instead of relying on its parent
+# process environment.
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+GO2_DDS_IFACE="${GO2_IFACE:-enx6c1ff7bc241e}"
+if ! ip link show "$GO2_DDS_IFACE" >/dev/null 2>&1; then
+    echo "ERROR: Go2 DDS network interface does not exist: $GO2_DDS_IFACE"
+    echo "Set GO2_IFACE to the interface connected to the robot."
+    exit 1
+fi
+if [ -z "${CYCLONEDDS_URI:-}" ]; then
+    export CYCLONEDDS_URI="<CycloneDDS><Domain><General><Interfaces>
+        <NetworkInterface name=\"${GO2_DDS_IFACE}\" priority=\"default\" multicast=\"default\" />
+    </Interfaces></General></Domain></CycloneDDS>"
+fi
 
 ACTIVE_MAP_DIR="${GO2_MAP_DIR:-$SCRIPT_DIR/maps/active}"
 if [ ! -f "$ACTIVE_MAP_DIR/manifest.yaml" ] || \
@@ -48,6 +66,7 @@ echo "  Go2 Dual-EKF Fused Localization"
 echo "  地图版本: $ACTIVE_MAP_ID"
 echo "  ICP: $ICP_MAP_PCD"
 echo "  Livox: $LIVOX_MODE"
+echo "  Go2 DDS: $GO2_DDS_IFACE"
 echo "========================================"
 
 exec ros2 launch go2_localization fused_localization.launch.py \

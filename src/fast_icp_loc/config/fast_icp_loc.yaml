@@ -1,6 +1,6 @@
 fast_icp_loc:
   ros__parameters:
-    map_pcd: "/home/wjg/go2_nav/maps/clean/pcd_icp_latest.pcd"
+    map_pcd: ""
     scan_topic: "/livox/lidar"
     imu_topic: "/livox/imu"
     world_frame: "map"
@@ -16,9 +16,17 @@ fast_icp_loc:
     rotation_lidar_from_imu: [1.0, 0.0, 0.0,
                               0.0, 1.0, 0.0,
                               0.0, 0.0, 1.0]
-    voxel_leaf: 0.25
+    voxel_leaf: 0.15
     max_corr_dist: 1.5
     max_translation_delta: 0.45
     max_yaw_delta: 0.60
     max_fitness_score: 1.0
     max_iterations: 15
+    # Initial-pose acquisition only. Normal navigation returns to the strict
+    # tracking limits above after consecutive stable matches.
+    initial_max_corr_dist: 3.0
+    initial_max_translation_delta: 2.5
+    initial_max_yaw_delta: 1.57
+    initial_max_fitness_score: 1.0
+    initial_max_iterations: 50
+    initial_confirmation_count: 3

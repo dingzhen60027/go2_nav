@@ -11,6 +11,7 @@ from sensor_msgs.msg import Imu
 from unitree_go.msg import SportModeState
 
 from .math_utils import normalize_quaternion, quaternion_conjugate, rotate_vector
+from .motion_utils import StationaryGyroCorrector
 
 
 class SportStateAdapter(Node):
@@ -27,6 +28,10 @@ class SportStateAdapter(Node):
         self.declare_parameter("orientation_stddev_roll_pitch", 0.035)
         self.declare_parameter("orientation_stddev_yaw", 0.5)
         self.declare_parameter("angular_velocity_stddev", 0.025)
+        self.declare_parameter("gyro_bias_initialization_samples", 100)
+        self.declare_parameter("gyro_bias_initialization_max_gyro", 0.03)
+        self.declare_parameter("stationary_linear_speed", 0.02)
+        self.declare_parameter("stationary_gyro_deadband", 0.015)
         self.declare_parameter("stale_timeout_sec", 0.5)
 
         self.base_frame = str(self.get_parameter("base_frame").value)
@@ -54,6 +59,20 @@ class SportStateAdapter(Node):
         )
         self.angular_velocity_stddev = float(
             self.get_parameter("angular_velocity_stddev").value
+        )
+        self.gyro_corrector = StationaryGyroCorrector(
+            required_samples=int(
+                self.get_parameter("gyro_bias_initialization_samples").value
+            ),
+            initialization_max_gyro=float(
+                self.get_parameter("gyro_bias_initialization_max_gyro").value
+            ),
+            stationary_linear_speed=float(
+                self.get_parameter("stationary_linear_speed").value
+            ),
+            stationary_gyro_deadband=float(
+                self.get_parameter("stationary_gyro_deadband").value
+            ),
         )
         self.stale_timeout = float(self.get_parameter("stale_timeout_sec").value)
 
@@ -127,6 +146,8 @@ class SportStateAdapter(Node):
         if not self.velocity_in_body_frame:
             velocity = rotate_vector(quaternion_conjugate(orientation), velocity)
 
+        velocity, gyro, _ = self.gyro_corrector.correct(velocity, gyro)
+
         stamp = self.select_stamp(message)
         twist = TwistWithCovarianceStamped()
         twist.header.stamp = stamp
@@ -190,6 +211,18 @@ class SportStateAdapter(Node):
             KeyValue(
                 key="arrival_timestamp_fallbacks",
                 value=str(self.used_arrival_stamp),
+            ),
+            KeyValue(
+                key="gyro_bias_ready",
+                value=str(self.gyro_corrector.ready).lower(),
+            ),
+            KeyValue(
+                key="gyro_bias_z",
+                value=f"{self.gyro_corrector.bias[2]:.6f}",
+            ),
+            KeyValue(
+                key="stationary_gyro_clamps",
+                value=str(self.gyro_corrector.stationary_clamps),
             ),
         ]
         diagnostic.status.append(status)

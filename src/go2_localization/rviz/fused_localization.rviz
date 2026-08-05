@@ -60,6 +60,10 @@ Visualization Manager:
       Size (Pixels): 1
       Style: Points
       Topic:
+        Depth: 1
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
         Value: /map_cloud
       Use Fixed Frame: true
       Use rainbow: true
@@ -76,7 +80,11 @@ Visualization Manager:
       Size (Pixels): 2
       Style: Points
       Topic:
-        Value: /scan_leveled
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /scan_obstacles
       Use Fixed Frame: true
       Use rainbow: true
       Value: true
@@ -94,18 +102,26 @@ Visualization Manager:
       Update Interval: 0
       Value: true
     - Class: rviz_default_plugins/Odometry
-      Enabled: true
-      Keep: 100
+      Axes Length: 0.35
+      Axes Radius: 0.035
+      Covariance: false
+      Enabled: false
+      Keep: 1
       Name: Local Odometry
       Position Tolerance: 0.01
+      Shape: Axes
       Topic:
         Value: /localization/odometry/local
-      Value: true
+      Value: false
     - Class: rviz_default_plugins/Odometry
+      Axes Length: 0.5
+      Axes Radius: 0.05
+      Covariance: false
       Enabled: true
-      Keep: 100
+      Keep: 1
       Name: Global Odometry
       Position Tolerance: 0.01
+      Shape: Axes
       Topic:
         Value: /localization/odometry/global
       Value: true
@@ -131,15 +147,15 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 14
+      Distance: 28
       Focal Point:
         X: 0
         Y: 0
         Z: 0
       Name: Current View
       Near Clip Distance: 0.01
-      Pitch: 0.9
-      Target Frame: base_link
+      Pitch: 1.05
+      Target Frame: map
       Yaw: 0.8
 Window Geometry:
   Height: 900

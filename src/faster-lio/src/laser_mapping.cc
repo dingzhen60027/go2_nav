@@ -5,6 +5,7 @@
 #include <tf2/utils.h>
 #include <yaml-cpp/yaml.h>
 #include <chrono>
+#include <cstdlib>
 #include <ctime>
 #include <execution>
 #include <filesystem>
@@ -1170,11 +1171,35 @@ void LaserMapping::Finish() {
         timestamp << std::put_time(std::localtime(&now_time), "%Y%m%d_%H%M%S");
 
         const std::string file_name = "scans_" + timestamp.str() + ".pcd";
-        const std::filesystem::path pcd_dir = std::filesystem::path(ROOT_DIR) / "PCD";
+        const char *output_directory = std::getenv("GO2_MAPPING_OUTPUT_DIR");
+        const std::filesystem::path pcd_dir = output_directory && *output_directory
+            ? std::filesystem::path(output_directory)
+            : std::filesystem::path(ROOT_DIR) / "PCD";
         const std::filesystem::path all_points_dir = pcd_dir / file_name;
+        const std::filesystem::path temporary_path = pcd_dir / ("." + file_name + ".tmp");
+        std::error_code filesystem_error;
+        std::filesystem::create_directories(pcd_dir, filesystem_error);
+        if (filesystem_error) {
+            LOG(ERROR) << "failed to create PCD output directory " << pcd_dir
+                       << ": " << filesystem_error.message();
+            return;
+        }
         pcl::PCDWriter pcd_writer;
-        LOG(INFO) << "current scan saved to /PCD/" << file_name;
-        pcd_writer.writeBinary(all_points_dir.string(), *pcd_to_save);
+        LOG(INFO) << "writing mapping PCD to " << all_points_dir;
+        std::filesystem::remove(temporary_path, filesystem_error);
+        if (pcd_writer.writeBinary(temporary_path.string(), *pcd_to_save) != 0) {
+            LOG(ERROR) << "failed to write mapping PCD to " << temporary_path;
+            std::filesystem::remove(temporary_path, filesystem_error);
+            return;
+        }
+        filesystem_error.clear();
+        std::filesystem::rename(temporary_path, all_points_dir, filesystem_error);
+        if (filesystem_error) {
+            LOG(ERROR) << "failed to publish mapping PCD " << all_points_dir
+                       << ": " << filesystem_error.message();
+            std::filesystem::remove(temporary_path, filesystem_error);
+            return;
+        }
 
         // Keep every mapping result immutable. scans.pcd remains a compatibility
         // link for scripts and the map workspace UI that expect the latest capture.
@@ -1200,6 +1225,12 @@ void LaserMapping::Finish() {
             } else {
                 LOG(INFO) << "latest mapping link: scans.pcd -> " << file_name;
             }
+        }
+        if (std::filesystem::exists(latest_path)) {
+            LOG(INFO) << "MAPPING_CAPTURE_SAVED path=" << latest_path
+                      << " points=" << pcd_to_save->size();
+        } else {
+            LOG(ERROR) << "mapping PCD was written but scans.pcd was not published";
         }
     }
 

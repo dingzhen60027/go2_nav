@@ -7,6 +7,7 @@
 #include <Eigen/Dense>
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <cmath>
 #include <limits>
 #include <vector>
@@ -29,7 +30,11 @@ FastIcpLoc::FastIcpLoc(const rclcpp::NodeOptions &options)
     : Node("fast_icp_loc", options), map_loaded_(false), localized_(false),
       leveling_done_(false), imu_count_(0) {
 
-  map_pcd_path_  = this->declare_parameter("map_pcd", "/home/wjg/go2_nav/maps/clean/pcd_icp_latest.pcd");
+  const char *project_root = std::getenv("GO2_NAV_ROOT");
+  const std::string default_map = project_root && *project_root
+      ? std::string(project_root) + "/maps/clean/pcd_icp_latest.pcd"
+      : "maps/clean/pcd_icp_latest.pcd";
+  map_pcd_path_  = this->declare_parameter("map_pcd", default_map);
   scan_topic_    = this->declare_parameter("scan_topic", "/livox/lidar");
   imu_topic_     = this->declare_parameter("imu_topic", "/livox/imu");
   world_frame_   = this->declare_parameter("world_frame", "camera_init");
@@ -41,6 +46,13 @@ FastIcpLoc::FastIcpLoc(const rclcpp::NodeOptions &options)
   max_translation_delta_ = this->declare_parameter("max_translation_delta", 0.45);
   max_yaw_delta_ = this->declare_parameter("max_yaw_delta", 0.60);
   max_fitness_score_ = this->declare_parameter("max_fitness_score", 1.0);
+  initial_max_corr_dist_ = this->declare_parameter("initial_max_corr_dist", 3.0);
+  initial_max_translation_delta_ =
+      this->declare_parameter("initial_max_translation_delta", 2.5);
+  initial_max_yaw_delta_ =
+      this->declare_parameter("initial_max_yaw_delta", 1.57);
+  initial_max_fitness_score_ =
+      this->declare_parameter("initial_max_fitness_score", 1.0);
   deskew_enabled_ = this->declare_parameter("deskew_enabled", true);
   max_imu_gap_sec_ = this->declare_parameter("max_imu_gap_sec", 0.02);
   max_scan_duration_sec_ = this->declare_parameter("max_scan_duration_sec", 0.15);
@@ -51,6 +63,9 @@ FastIcpLoc::FastIcpLoc(const rclcpp::NodeOptions &options)
       this->declare_parameter("publish_only_accepted_pose", false);
   max_pending_scans_ = this->declare_parameter("max_pending_scans", 3);
   max_iter_      = this->declare_parameter("max_iterations", 30);
+  initial_max_iter_ = this->declare_parameter("initial_max_iterations", 50);
+  initial_confirmation_count_ =
+      this->declare_parameter("initial_confirmation_count", 3);
 
   if (max_imu_gap_sec_ <= 0.0) {
     RCLCPP_WARN(get_logger(), "max_imu_gap_sec must be positive; using 0.02 s");
@@ -76,6 +91,47 @@ FastIcpLoc::FastIcpLoc(const rclcpp::NodeOptions &options)
     RCLCPP_WARN(get_logger(), "prediction_timeout_sec must be positive; using 0.25 s");
     prediction_timeout_sec_ = 0.25;
   }
+  if (initial_max_corr_dist_ < max_corr_dist_) {
+    RCLCPP_WARN(get_logger(),
+                "initial_max_corr_dist is below tracking limit; using %.2f m",
+                max_corr_dist_);
+    initial_max_corr_dist_ = max_corr_dist_;
+  }
+  if (initial_max_translation_delta_ < max_translation_delta_) {
+    RCLCPP_WARN(get_logger(),
+                "initial_max_translation_delta is below tracking limit; using %.2f m",
+                max_translation_delta_);
+    initial_max_translation_delta_ = max_translation_delta_;
+  }
+  if (initial_max_yaw_delta_ < max_yaw_delta_) {
+    RCLCPP_WARN(get_logger(),
+                "initial_max_yaw_delta is below tracking limit; using %.2f rad",
+                max_yaw_delta_);
+    initial_max_yaw_delta_ = max_yaw_delta_;
+  }
+  if (initial_max_fitness_score_ <= 0.0) {
+    RCLCPP_WARN(get_logger(),
+                "initial_max_fitness_score must be positive; using %.2f",
+                max_fitness_score_);
+    initial_max_fitness_score_ = max_fitness_score_;
+  }
+  if (initial_max_iter_ < max_iter_) {
+    RCLCPP_WARN(get_logger(),
+                "initial_max_iterations is below tracking iterations; using %d",
+                max_iter_);
+    initial_max_iter_ = max_iter_;
+  }
+  if (initial_confirmation_count_ < 1) {
+    RCLCPP_WARN(get_logger(),
+                "initial_confirmation_count must be at least 1; using 3");
+    initial_confirmation_count_ = 3;
+  }
+
+  acceptance_gate_.configure(
+      {max_translation_delta_, max_yaw_delta_, max_fitness_score_},
+      {initial_max_translation_delta_, initial_max_yaw_delta_,
+       initial_max_fitness_score_},
+      initial_confirmation_count_);
 
   const auto rotation_values = this->declare_parameter<std::vector<double>>(
       "rotation_lidar_from_imu",
@@ -139,12 +195,21 @@ FastIcpLoc::FastIcpLoc(const rclcpp::NodeOptions &options)
   tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(this);
   // 持续发 TF（直到定位开始），保证实时点云在 RViz 里一直可见
   tf_timer_ = this->create_wall_timer(std::chrono::milliseconds(200), [this]() {
-    if (localized_) return;  // 定位开始后由 publishPose 负责
+    if (acceptance_gate_.trackingLocked()) return;
+    const Eigen::Matrix4d pose = localized_ ? initial_seed_pose_
+                                             : Eigen::Matrix4d::Identity();
     geometry_msgs::msg::TransformStamped tf;
     tf.header.stamp = this->now();
     tf.header.frame_id = world_frame_;
     tf.child_frame_id = body_frame_;
-    tf.transform.rotation.w = 1.0;
+    tf.transform.translation.x = pose(0, 3);
+    tf.transform.translation.y = pose(1, 3);
+    tf.transform.translation.z = pose(2, 3);
+    const Eigen::Quaterniond orientation(pose.block<3, 3>(0, 0));
+    tf.transform.rotation.x = orientation.x();
+    tf.transform.rotation.y = orientation.y();
+    tf.transform.rotation.z = orientation.z();
+    tf.transform.rotation.w = orientation.w();
     tf_broadcaster_->sendTransform(tf);
   });
 
@@ -173,6 +238,7 @@ FastIcpLoc::FastIcpLoc(const rclcpp::NodeOptions &options)
   leveled_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/scan_leveled", 10);
 
   last_pose_ = Eigen::Matrix4d::Identity();
+  initial_seed_pose_ = Eigen::Matrix4d::Identity();
 
   RCLCPP_INFO(get_logger(), "Fast ICP Loc ready. Map: %lu pts", map_cloud_ds_->size());
   RCLCPP_INFO(get_logger(), "Collecting %d IMU samples to estimate leveling...", IMU_INIT_COUNT);
@@ -282,14 +348,33 @@ void FastIcpLoc::imuCallback(sensor_msgs::msg::Imu::SharedPtr msg) {
 void FastIcpLoc::initPoseCallback(geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg) {
   const auto &p = msg->pose.pose.position;
   const auto &o = msg->pose.pose.orientation;
+  if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z) ||
+      !std::isfinite(o.x) || !std::isfinite(o.y) || !std::isfinite(o.z) ||
+      !std::isfinite(o.w)) {
+    RCLCPP_ERROR(get_logger(), "Ignoring initial pose containing NaN or infinity");
+    return;
+  }
   Eigen::Quaterniond q(o.w, o.x, o.y, o.z);
+  if (q.norm() < 1e-9) {
+    RCLCPP_ERROR(get_logger(), "Ignoring initial pose with invalid orientation");
+    return;
+  }
+  q.normalize();
+  last_pose_.setIdentity();
   last_pose_.block<3,3>(0,0) = q.toRotationMatrix();
   last_pose_(0,3) = p.x;
   last_pose_(1,3) = p.y;
   last_pose_(2,3) = p.z;
+  initial_seed_pose_ = last_pose_;
   prediction_received_ns_ = 0;
+  acceptance_gate_.reset();
   localized_ = true;
-  RCLCPP_INFO(get_logger(), "Initial pose: (%.2f, %.2f, %.2f), start tracking", p.x, p.y, p.z);
+  RCLCPP_INFO(
+      get_logger(),
+      "Initial pose: (%.2f, %.2f, %.2f), start acquisition "
+      "(limits %.2fm %.2frad, confirmation %d scans)",
+      p.x, p.y, p.z, initial_max_translation_delta_, initial_max_yaw_delta_,
+      initial_confirmation_count_);
 }
 
 void FastIcpLoc::predictionPoseCallback(
@@ -486,14 +571,18 @@ void FastIcpLoc::processScan(
   fast_gicp::FastGICP<pcl::PointXYZ, pcl::PointXYZ> icp;
   icp.setInputSource(scan_ds);
   icp.setInputTarget(map_cloud_ds_);
-  icp.setMaxCorrespondenceDistance(max_corr_dist_);
-  icp.setMaximumIterations(max_iter_);
+  const bool acquiring = !acceptance_gate_.trackingLocked();
+  const double active_max_corr_dist =
+      acquiring ? initial_max_corr_dist_ : max_corr_dist_;
+  const int active_max_iterations = acquiring ? initial_max_iter_ : max_iter_;
+  icp.setMaxCorrespondenceDistance(active_max_corr_dist);
+  icp.setMaximumIterations(active_max_iterations);
   icp.setNumThreads(4);
 
   Eigen::Matrix4d initial_guess = last_pose_;
   const int64_t prediction_age_ns =
       this->now().nanoseconds() - prediction_received_ns_;
-  if (prediction_received_ns_ > 0 && prediction_age_ns >= 0 &&
+  if (!acquiring && prediction_received_ns_ > 0 && prediction_age_ns >= 0 &&
       prediction_age_ns <= static_cast<int64_t>(prediction_timeout_sec_ * 1e9)) {
     initial_guess = prediction_pose_;
   }
@@ -502,6 +591,7 @@ void FastIcpLoc::processScan(
   icp.align(*aligned, initial_guess.cast<float>());
 
   bool accepted = false;
+  bool publish_accepted_pose = false;
   if (icp.hasConverged()) {
     const Eigen::Matrix4d candidate = icp.getFinalTransformation().cast<double>();
     const Eigen::Vector3d delta_t =
@@ -509,27 +599,56 @@ void FastIcpLoc::processScan(
     const double translation_delta = delta_t.head<2>().norm();
     const double yaw_delta =
         std::abs(normalizeAngle(yawFromPose(candidate) - yawFromPose(initial_guess)));
-    const double fitness_score = icp.getFitnessScore(max_corr_dist_);
+    const double fitness_score = icp.getFitnessScore(active_max_corr_dist);
+    const IcpGateDecision decision = acceptance_gate_.evaluate(
+        translation_delta, yaw_delta, fitness_score);
 
-    if (translation_delta > max_translation_delta_ ||
-        yaw_delta > max_yaw_delta_ ||
-        fitness_score > max_fitness_score_) {
+    if (!decision.update_pose) {
+      const double translation_limit = acquiring ? initial_max_translation_delta_
+                                                  : max_translation_delta_;
+      const double yaw_limit = acquiring ? initial_max_yaw_delta_
+                                          : max_yaw_delta_;
+      const double fitness_limit = acquiring ? initial_max_fitness_score_
+                                              : max_fitness_score_;
       RCLCPP_WARN_THROTTLE(
           get_logger(), *this->get_clock(), 1000,
           "Reject ICP jump: trans=%.3fm yaw=%.3frad fitness=%.3f "
-          "(limits %.3fm %.3frad %.3f)",
+          "(%s limits %.3fm %.3frad %.3f)",
           translation_delta, yaw_delta, fitness_score,
-          max_translation_delta_, max_yaw_delta_, max_fitness_score_);
+          acquiring ? "acquisition" : "tracking", translation_limit,
+          yaw_limit, fitness_limit);
     } else {
       last_pose_ = candidate;
       accepted = true;
+      publish_accepted_pose = decision.publish_pose;
+      if (decision.restarted_confirmation) {
+        RCLCPP_WARN_THROTTLE(
+            get_logger(), *this->get_clock(), 1000,
+            "ICP acquisition candidate moved; restarting confirmation");
+      } else if (!decision.publish_pose) {
+        RCLCPP_INFO_THROTTLE(
+            get_logger(), *this->get_clock(), 1000,
+            "ICP acquisition candidate accepted (%d/%d), not publishing yet",
+            acceptance_gate_.confirmationCount(),
+            acceptance_gate_.requiredConfirmations());
+      }
+      if (decision.just_locked) {
+        RCLCPP_INFO(
+            get_logger(),
+            "ICP acquisition locked after %d confirmations; switching to "
+            "tracking gates (%.2fm %.2frad fitness %.2f)",
+            acceptance_gate_.confirmationCount(), max_translation_delta_,
+            max_yaw_delta_, max_fitness_score_);
+      }
     }
   } else {
     RCLCPP_WARN_THROTTLE(get_logger(), *this->get_clock(), 2000,
                          "ICP not converged, keeping last pose");
   }
 
-  if (accepted || !publish_only_accepted_pose_) {
+  if (publish_accepted_pose ||
+      (acceptance_gate_.trackingLocked() &&
+       (!publish_only_accepted_pose_ || accepted))) {
     publishPose(last_pose_, scan_stamp);
   }
 }

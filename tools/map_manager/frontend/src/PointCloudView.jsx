@@ -75,12 +75,54 @@ function formatHeight(value) {
   return Number.isFinite(value) ? value.toFixed(2) : '--'
 }
 
-export default function PointCloudView({ url }) {
+export default function PointCloudView({
+  url,
+  colorMode = 'height',
+  selectedClusterIds = [],
+  onClusterClick,
+}) {
   const hostRef = useRef(null)
   const fitRef = useRef(() => {})
+  const cloudRef = useRef(null)
+  const baseColorsRef = useRef(null)
+  const clusterIdsRef = useRef(null)
+  const selectedClustersRef = useRef(new Set(selectedClusterIds))
+  const clusterClickRef = useRef(onClusterClick)
   const [state, setState] = useState('loading')
   const [pointCount, setPointCount] = useState(0)
   const [heightRange, setHeightRange] = useState(null)
+
+  selectedClustersRef.current = new Set(selectedClusterIds)
+  clusterClickRef.current = onClusterClick
+
+  const applyClusterSelection = () => {
+    const cloud = cloudRef.current
+    const baseColors = baseColorsRef.current
+    const clusterIds = clusterIdsRef.current
+    const colors = cloud?.geometry.getAttribute('color')
+    if (!colors || !baseColors || !clusterIds) return
+    const selected = selectedClustersRef.current
+    const hasSelection = selected.size > 0
+    for (let index = 0; index < colors.count; index += 1) {
+      const clusterId = Math.round(clusterIds.getX(index))
+      if (clusterId >= 0 && selected.has(clusterId)) {
+        colors.setXYZ(index, 1, 0.04, 0.02)
+      } else {
+        const brightness = hasSelection ? 0.58 : 1
+        colors.setXYZ(
+          index,
+          baseColors[index * 3] * brightness,
+          baseColors[index * 3 + 1] * brightness,
+          baseColors[index * 3 + 2] * brightness,
+        )
+      }
+    }
+    colors.needsUpdate = true
+  }
+
+  useEffect(() => {
+    applyClusterSelection()
+  }, [selectedClusterIds])
 
   useEffect(() => {
     const host = hostRef.current
@@ -130,6 +172,9 @@ export default function PointCloudView({ url }) {
     fitRef.current = fit
 
     const loader = new PLYLoader()
+    if (colorMode === 'cluster') {
+      loader.setCustomPropertyNameMapping({ clusterId: ['cluster_id'] })
+    }
     loader.load(
       url,
       (geometry) => {
@@ -139,7 +184,22 @@ export default function PointCloudView({ url }) {
         }
         geometry.computeBoundingBox()
         geometry.computeBoundingSphere()
-        const range = colorizeByHeight(geometry)
+        const position = geometry.getAttribute('position')
+        let range = null
+        if (colorMode === 'cluster') {
+          const sourceColors = geometry.getAttribute('color')
+          const floatColors = new Float32Array(sourceColors?.count ? sourceColors.count * 3 : position.count * 3)
+          for (let index = 0; index < position.count; index += 1) {
+            floatColors[index * 3] = sourceColors ? sourceColors.getX(index) : 0.36
+            floatColors[index * 3 + 1] = sourceColors ? sourceColors.getY(index) : 0.41
+            floatColors[index * 3 + 2] = sourceColors ? sourceColors.getZ(index) : 0.47
+          }
+          geometry.setAttribute('color', new THREE.Float32BufferAttribute(floatColors, 3))
+          baseColorsRef.current = floatColors.slice()
+          clusterIdsRef.current = geometry.getAttribute('clusterId')
+        } else {
+          range = colorizeByHeight(geometry)
+        }
         const radius = Math.max(geometry.boundingSphere?.radius || 10, 1)
         const bounds = geometry.boundingBox
         const boundsSize = bounds.getSize(new THREE.Vector3())
@@ -169,10 +229,12 @@ export default function PointCloudView({ url }) {
           depthWrite: false,
         })
         cloud = new THREE.Points(geometry, material)
+        cloudRef.current = cloud
         scene.add(cloud)
         setPointCount(geometry.getAttribute('position')?.count || 0)
         setHeightRange(range)
         setState('ready')
+        applyClusterSelection()
         fit()
       },
       undefined,
@@ -192,6 +254,37 @@ export default function PointCloudView({ url }) {
     observer.observe(host)
     resize()
 
+    const raycaster = new THREE.Raycaster()
+    const pointer = new THREE.Vector2()
+    let pointerDown = null
+    const pointerPosition = (event) => {
+      const rect = renderer.domElement.getBoundingClientRect()
+      pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1
+      pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1
+    }
+    const onPointerDown = (event) => {
+      pointerDown = { x: event.clientX, y: event.clientY }
+    }
+    const onPointerUp = (event) => {
+      if (colorMode !== 'cluster' || !cloud || !clusterIdsRef.current || !pointerDown) return
+      const distance = Math.hypot(event.clientX - pointerDown.x, event.clientY - pointerDown.y)
+      pointerDown = null
+      if (distance > 5) return
+      pointerPosition(event)
+      raycaster.params.Points.threshold = Math.max(cloud.geometry.boundingSphere?.radius / 180, 0.08)
+      raycaster.setFromCamera(pointer, camera)
+      const hit = raycaster.intersectObject(cloud, false).find((entry) => {
+        const clusterId = Math.round(clusterIdsRef.current.getX(entry.index))
+        return clusterId >= 0
+      })
+      if (hit) {
+        clusterClickRef.current?.(Math.round(clusterIdsRef.current.getX(hit.index)))
+      }
+    }
+    renderer.domElement.addEventListener('pointerdown', onPointerDown)
+    renderer.domElement.addEventListener('pointerup', onPointerUp)
+    if (colorMode === 'cluster') renderer.domElement.style.cursor = 'crosshair'
+
     const animate = () => {
       controls.update()
       renderer.render(scene, camera)
@@ -204,6 +297,8 @@ export default function PointCloudView({ url }) {
       cancelAnimationFrame(animationFrame)
       observer.disconnect()
       controls.dispose()
+      renderer.domElement.removeEventListener('pointerdown', onPointerDown)
+      renderer.domElement.removeEventListener('pointerup', onPointerUp)
       if (cloud) {
         cloud.geometry.dispose()
         cloud.material.dispose()
@@ -215,8 +310,11 @@ export default function PointCloudView({ url }) {
       pointTexture.dispose()
       renderer.dispose()
       renderer.domElement.remove()
+      cloudRef.current = null
+      baseColorsRef.current = null
+      clusterIdsRef.current = null
     }
-  }, [url])
+  }, [url, colorMode])
 
   if (!url) {
     return (
@@ -239,7 +337,10 @@ export default function PointCloudView({ url }) {
       {state === 'ready' && (
         <>
           <div className="canvas-meta"><strong>{pointCount.toLocaleString()}</strong><span>points</span></div>
-          {heightRange && (
+          {colorMode === 'cluster' && (
+            <div className="cluster-canvas-hint">点击彩色点选择；亮红色表示待删除</div>
+          )}
+          {colorMode === 'height' && heightRange && (
             <div className="height-legend" aria-label="点云 Z 高度色带">
               <div className="height-legend-head"><strong>Z 高度</strong><span>m</span></div>
               <div className="height-legend-body">
